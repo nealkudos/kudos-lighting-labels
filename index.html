@@ -1,0 +1,695 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Kudos Lighting Labels</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: one working column — drop zone, checks, patch table, sheet preview — like a paperwork bench, dark by default to match the other Kudos tools */
+:root {
+  --bg: #0d1520; --panel: #142030; --panel-2: #1b2a3e; --line: #2a3b52;
+  --fg: #e6edf5; --muted: #93a1b3; --accent: #3d8bff; --accent-deep: #005bb5;
+  --ok: #3fbf86; --warn: #f0b03c; --bad: #ef5d5d; --label-bg: #ffffff; --label-fg: #111111; --label-line: #c8c8c8;
+  --display: "Barlow Condensed", "Arial Narrow", Arial, sans-serif;
+  --body: "Barlow", "Segoe UI", Arial, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) {
+  --bg: #eef2f7; --panel: #ffffff; --panel-2: #f3f6fa; --line: #d3dbe6;
+  --fg: #142030; --muted: #5d6b7d; --accent: #005bb5; --accent-deep: #003d7a;
+  --ok: #1d8a5b; --warn: #a86a00; --bad: #c43a3a; color-scheme: light; } }
+:root[data-theme="light"] {
+  --bg: #eef2f7; --panel: #ffffff; --panel-2: #f3f6fa; --line: #d3dbe6;
+  --fg: #142030; --muted: #5d6b7d; --accent: #005bb5; --accent-deep: #003d7a;
+  --ok: #1d8a5b; --warn: #a86a00; --bad: #c43a3a; color-scheme: light; }
+
+* { box-sizing: border-box; }
+html, body { background: var(--bg); color: var(--fg); }
+body { margin: 0; font: 15px/1.5 var(--body); }
+.wrap { max-width: 1100px; margin: 0 auto; padding-block: 20px 60px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid; gap: 18px; }
+header { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 12px; }
+h1 { font: 700 2rem/1 var(--display); letter-spacing: .01em; margin: 0; text-wrap: balance; }
+h1 span { color: var(--accent); }
+.sub { color: var(--muted); margin: 4px 0 0; }
+h2 { font: 600 1.05rem/1.2 var(--display); text-transform: uppercase; letter-spacing: .08em; margin: 0; color: var(--muted); }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; display: grid; gap: 12px; min-width: 0; }
+.row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.grow { flex: 1 1 220px; min-width: 0; }
+label.f { display: grid; gap: 4px; font-size: .8rem; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+input[type=text], input[type=number], select { font: 500 .95rem var(--body); color: var(--fg); background: var(--panel-2);
+  border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; width: 100%; min-width: 0; }
+input:focus-visible, select:focus-visible, button:focus-visible, .drop:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
+button { font: 600 .95rem var(--body); border-radius: 6px; padding: 9px 14px; border: 1px solid var(--line);
+  background: var(--panel-2); color: var(--fg); cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent-deep); border-color: var(--accent-deep); color: #fff; }
+button.primary:hover { background: var(--accent); }
+button.link { background: none; border: none; padding: 2px 4px; color: var(--accent); font-weight: 600; }
+button:disabled { opacity: .5; cursor: default; }
+
+.drop { border: 2px dashed var(--line); border-radius: 10px; padding: 22px 16px; text-align: center; display: grid; gap: 6px; place-items: center; cursor: pointer; transition: border-color .15s, background .15s; }
+.drop.over { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.drop strong { font: 600 1.25rem var(--display); letter-spacing: .02em; }
+.drop input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.status { font-size: .9rem; color: var(--muted); }
+.example { display: inline-block; font: 600 .72rem var(--body); text-transform: uppercase; letter-spacing: .08em; padding: 2px 8px; border-radius: 99px; background: color-mix(in srgb, var(--warn) 22%, transparent); color: var(--warn); }
+
+.checks { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.checks li { display: flex; gap: 8px; align-items: baseline; font-size: .92rem; }
+.dot { width: 9px; height: 9px; border-radius: 50%; flex: none; transform: translateY(1px); }
+.dot.bad { background: var(--bad); } .dot.warn { background: var(--warn); } .dot.ok { background: var(--ok); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { font-size: .82rem; padding: 3px 9px; border-radius: 99px; background: var(--panel-2); border: 1px solid var(--line); }
+
+.tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; min-width: 640px; font-variant-numeric: tabular-nums; }
+th, td { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; }
+th { font: 600 .78rem var(--body); text-transform: uppercase; letter-spacing: .06em; color: var(--muted); background: var(--panel-2); position: sticky; top: 0; }
+td.mono, .mono { font-family: var(--mono); font-size: .9rem; }
+td input[type=number] { width: 80px; font-family: var(--mono); }
+td input.fx { min-width: 240px; }
+tr.need td:first-child { box-shadow: inset 3px 0 0 var(--bad); }
+tr.check td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
+.tag { font-size: .72rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; padding: 1px 6px; border-radius: 4px; white-space: nowrap; }
+.tag.auto { color: var(--warn); background: color-mix(in srgb, var(--warn) 15%, transparent); }
+.tag.miss { color: var(--bad); background: color-mix(in srgb, var(--bad) 15%, transparent); }
+.del { color: var(--muted); border: none; background: none; padding: 4px 8px; font-size: 1.1rem; line-height: 1; }
+.del:hover { color: var(--bad); }
+
+/* sheet preview — proportional to A4 with the Avery 16-up grid */
+.sheets { display: flex; flex-wrap: wrap; gap: 18px; }
+.sheet { width: min(100%, 340px); aspect-ratio: 210 / 297; background: var(--label-bg); border-radius: 3px; box-shadow: 0 4px 18px rgb(0 0 0 / .25);
+  padding: 4.4% 2.1%; display: grid; grid-template-columns: 1fr 1.43% 1fr; grid-template-rows: repeat(8, 1fr); max-width: 100%; }
+.lbl { color: var(--label-fg); display: grid; align-content: center; justify-items: center; text-align: center; font-family: Arial, Helvetica, sans-serif; overflow: hidden; line-height: 1.12; padding: 0 3px; }
+.lbl.b-grey { outline: 1px solid var(--label-line); outline-offset: -1px; }
+.lbl.b-black { outline: 1px solid #000; outline-offset: -1px; }
+.lbl .n { font-size: clamp(8px, 2.6vw, 9px); white-space: nowrap; text-overflow: ellipsis; overflow: hidden; max-width: 100%; }
+.lbl .c { font-weight: 700; font-size: clamp(14px, 4.6vw, 17px); }
+.lbl .a { font-size: clamp(8px, 2.4vw, 9px); }
+.lbl.empty .n { color: #c43a3a; }
+.sheetcap { font-size: .8rem; color: var(--muted); margin-top: 6px; }
+details summary { cursor: pointer; font-weight: 600; }
+.toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(18px + env(safe-area-inset-bottom, 0px)); background: var(--fg); color: var(--bg); padding: 10px 16px; border-radius: 8px; font-weight: 500; max-width: calc(100% - 32px); z-index: 20; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>KUDOS <span>Lighting Labels</span></h1>
+      <p class="sub">Drop in the lighting patch PDF. Check the channels and fixtures. Download the Avery 16-per-sheet labels as Word.</p>
+    </div>
+  </header>
+
+  <section class="panel" aria-labelledby="h-in">
+    <h2 id="h-in">1 · Patch drawing</h2>
+    <label class="drop" id="drop">
+      <input type="file" id="file" accept="application/pdf,.pdf">
+      <strong>Choose the patch PDF</strong>
+      <span class="status">or drag it here. Every page is read, so the whole lighting pack is fine.</span>
+    </label>
+    <div class="row">
+      <div class="grow"><label class="f" for="job">Job name (used for the file name)
+        <input type="text" id="job" placeholder="10th October - NHM - HH - IKSV"></label></div>
+      <div><label class="f" for="border">Label borders
+        <select id="border">
+          <option value="grey">Light grey cut line</option>
+          <option value="black">Black</option>
+          <option value="none">None (pre-cut Avery sheets)</option>
+        </select></label></div>
+    </div>
+    <p class="status" id="status"></p>
+  </section>
+
+  <section class="panel" aria-labelledby="h-chk">
+    <h2 id="h-chk">2 · Checks</h2>
+    <ul class="checks" id="checks"></ul>
+    <div id="legendBox" hidden>
+      <div class="status">Fixtures in the drawing's symbol key</div>
+      <div class="legend" id="legend"></div>
+    </div>
+  </section>
+
+  <section class="panel" aria-labelledby="h-tbl">
+    <div class="row" style="justify-content:space-between">
+      <h2 id="h-tbl">3 · Patch <span id="exampleTag" class="example">Example — IKSV NHM</span></h2>
+      <div class="row">
+        <button type="button" id="addRow">Add label</button>
+        <button type="button" class="primary" id="download">Download Word labels</button>
+      </div>
+    </div>
+    <p class="status">Fixture names are matched from the address spacing. Amber rows were filled automatically and need a glance. Setting a fixture on one row fills the blank rows with the same footprint in that universe.</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Channel</th><th>Address</th><th>Chs</th><th>Fixture (mode)</th><th></th><th></th></tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+    <datalist id="fxlist"></datalist>
+    <details>
+      <summary>Fixture modes library</summary>
+      <p class="status">Used to name fixtures from their channel count. Your additions stay in this browser.</p>
+      <div class="row">
+        <div class="grow"><label class="f" for="nfName">Fixture<input type="text" id="nfName" placeholder="Robe Esprite"></label></div>
+        <div style="flex:0 1 150px"><label class="f" for="nfMode">Mode<input type="text" id="nfMode" placeholder="Mode 3"></label></div>
+        <div style="flex:0 1 100px"><label class="f" for="nfCh">Channels<input type="number" id="nfCh" min="1" max="512" placeholder="50"></label></div>
+        <button type="button" id="nfAdd" style="align-self:end">Add mode</button>
+      </div>
+      <div class="legend" id="libList" style="margin-top:10px"></div>
+    </details>
+  </section>
+
+  <section class="panel" aria-labelledby="h-prev">
+    <h2 id="h-prev">4 · Sheet preview</h2>
+    <div class="sheets" id="sheets"></div>
+  </section>
+</div>
+<div class="toast" id="toast" hidden></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script>
+/* Kudos Lighting Labels — core logic (no DOM).
+   Shared by index.html and the Node test harness.
+   Exposes: KudosLabels.extractTokens, pairTokens, buildRows, buildDocx, FIXTURE_LIBRARY */
+(function (root) {
+  'use strict';
+
+  // Known fixture modes. footprint = DMX channels used (= address spacing).
+  // Add to this list as new fixtures come in; the app also lets users add their own.
+  const FIXTURE_LIBRARY = [
+    { name: 'Robe LEDBeam 150', mode: 'Mode 1', footprint: 22 },
+    { name: 'Robe LEDBeam 350', mode: 'Mode 1', footprint: 22 },
+    { name: 'Robe Esprite', mode: 'Mode 3', footprint: 50 },
+    { name: 'Robe Spikie', mode: 'Mode 1', footprint: 27 },
+    { name: 'Ayrton Perseo Profile S', mode: 'Extended 61', footprint: 61 },
+    { name: 'Martin MAC Aura XIP', mode: 'Extended 57', footprint: 57 },
+    { name: 'Chauvet Color Strike M', mode: 'Mode 74', footprint: 74 },
+    { name: 'LEDJ Spectra QX40 MKII', mode: 'Mode 25', footprint: 25 },
+    { name: 'Astera AX9', mode: 'Mode 94', footprint: 8 }
+  ];
+
+  const ADDR_RE = /^(\d{1,2})\s*[\/.]\s*(\d{1,3})$/;   // 2/177 or 2.177
+  const CHAN_RE = /^\d{3,4}$/;                          // 101, 1201
+
+  /* ---------- 1. Text extraction ----------
+     items: pdf.js textContent items for one page: {str, transform:[a,b,c,d,e,f], width, height}
+     Vectorworks writes callouts as several runs and often rotates them, so runs are
+     merged into words along their own baseline direction before matching. */
+  function mergeRuns(items) {
+    const runs = [];
+    for (const it of items) {
+      const s = (it.str || '');
+      if (!s.trim()) { if (runs.length) runs[runs.length - 1].gapBreak = true; continue; }
+      const [a, b] = it.transform;
+      const size = Math.hypot(a, b) || Math.abs(it.height) || 10;
+      const dx = a / size, dy = b / size;               // unit vector along baseline
+      const ox = it.transform[4], oy = it.transform[5];
+      runs.push({ str: s, ox, oy, dx, dy, size, width: it.width || s.length * size * 0.55 });
+    }
+    const words = [];
+    let cur = null;
+    for (const r of runs) {
+      if (cur && !cur.gapBreak && sameDir(cur, r)) {
+        const ex = cur.ox + cur.dx * cur.len, ey = cur.oy + cur.dy * cur.len;
+        const along = (r.ox - ex) * cur.dx + (r.oy - ey) * cur.dy;
+        const perp = -(r.ox - ex) * cur.dy + (r.oy - ey) * cur.dx;
+        if (Math.abs(perp) < cur.size * 0.35 && along > -cur.size * 0.3 && along < cur.size * 0.15) {
+          cur.str += r.str;
+          cur.len = ((r.ox + r.dx * r.width) - cur.ox) * cur.dx + ((r.oy + r.dy * r.width) - cur.oy) * cur.dy;
+          cur.gapBreak = r.gapBreak;
+          continue;
+        }
+      }
+      cur = { str: r.str, ox: r.ox, oy: r.oy, dx: r.dx, dy: r.dy, size: r.size, len: r.width, gapBreak: r.gapBreak };
+      words.push(cur);
+    }
+    return words;
+  }
+  function sameDir(p, q) { return Math.abs(p.dx - q.dx) < 0.05 && Math.abs(p.dy - q.dy) < 0.05; }
+
+  function centre(w) {
+    // midpoint along baseline, nudged up by ~0.35 em perpendicular (text body centre)
+    const mx = w.ox + w.dx * w.len / 2, my = w.oy + w.dy * w.len / 2;
+    return { x: mx - w.dy * w.size * 0.35, y: my + w.dx * w.size * 0.35 };
+  }
+
+  function extractTokens(items, page) {
+    const words = mergeRuns(items);
+    const addrs = [], chans = [], other = [];
+    for (const w of words) {
+      for (const part of w.str.trim().split(/\s+/)) {
+        const c = centre(w);
+        const m = part.match(ADDR_RE);
+        if (m) {
+          const u = +m[1], a = +m[2];
+          if (u === 0 || a === 0) continue;          // 0/0 = unpatched placeholder
+          if (a > 512) continue;
+          addrs.push({ universe: u, address: a, x: c.x, y: c.y, size: w.size, page });
+        } else if (CHAN_RE.test(part)) {
+          chans.push({ channel: +part, x: c.x, y: c.y, size: w.size, page });
+        } else {
+          other.push({ str: part, page });
+        }
+      }
+    }
+    return { addrs, chans, other, words };
+  }
+
+  /* ---------- 2. Pair each address with its nearest channel number ----------
+     Greedy one-to-one by ascending distance, within maxEm × font size. */
+  function pairTokens(addrs, chans, maxEm) {
+    maxEm = maxEm || 4;
+    const cand = [];
+    addrs.forEach((a, i) => chans.forEach((c, j) => {
+      if (a.page !== c.page) return;
+      const d = Math.hypot(a.x - c.x, a.y - c.y);
+      if (d <= maxEm * Math.max(a.size, c.size)) cand.push({ i, j, d });
+    }));
+    cand.sort((p, q) => p.d - q.d);
+    const usedA = new Set(), usedC = new Set(), pairs = [];
+    for (const k of cand) {
+      if (usedA.has(k.i) || usedC.has(k.j)) continue;
+      usedA.add(k.i); usedC.add(k.j);
+      pairs.push({ addr: addrs[k.i], chan: chans[k.j] });
+    }
+    const loneAddrs = addrs.filter((_, i) => !usedA.has(i));
+    return { pairs, loneAddrs };
+  }
+
+  /* ---------- 3. Merge pages into one row per DMX address, with checks ---------- */
+  function buildRows(pagesTokens, library) {
+    library = library || FIXTURE_LIBRARY;
+    const byKey = new Map();
+    const conflicts = [];
+    for (const pt of pagesTokens) {
+      const { pairs, loneAddrs } = pairTokens(pt.addrs, pt.chans);
+      for (const p of pairs) {
+        const key = p.addr.universe + '/' + p.addr.address;
+        const prev = byKey.get(key);
+        if (!prev) byKey.set(key, { universe: p.addr.universe, address: p.addr.address, channel: p.chan.channel, pages: [p.addr.page] });
+        else {
+          if (!prev.pages.includes(p.addr.page)) prev.pages.push(p.addr.page);
+          if (prev.channel == null) prev.channel = p.chan.channel;
+          else if (prev.channel !== p.chan.channel) conflicts.push({ key, channels: [prev.channel, p.chan.channel], page: p.addr.page });
+        }
+      }
+      for (const a of loneAddrs) {
+        const key = a.universe + '/' + a.address;
+        if (!byKey.has(key)) byKey.set(key, { universe: a.universe, address: a.address, channel: null, pages: [a.page] });
+      }
+    }
+    const rows = [...byKey.values()].sort((p, q) => p.universe - q.universe || p.address - q.address);
+
+    // footprint = gap to next address in same universe
+    rows.forEach((r, i) => {
+      const n = rows[i + 1];
+      r.footprint = (n && n.universe === r.universe) ? n.address - r.address : null;
+    });
+    // last fixture in a universe: assume same footprint as the one before if it was the same gap pattern
+    rows.forEach((r, i) => {
+      if (r.footprint == null) {
+        const p = rows[i - 1];
+        r.footprintGuess = (p && p.universe === r.universe) ? p.footprint : null;
+      }
+    });
+    // suggest fixture from footprint (only if exactly one library match)
+    rows.forEach(r => {
+      const fp = r.footprint != null ? r.footprint : r.footprintGuess;
+      const hits = library.filter(f => f.footprint === fp);
+      r.suggestions = hits;
+      r.fixture = hits.length === 1 ? hits[0].name + ' (' + hits[0].mode + ')' : '';
+    });
+
+    // checks
+    const issues = [];
+    conflicts.forEach(c => issues.push({ type: 'conflict', msg: `${c.key} has channel ${c.channels[0]} on one page and ${c.channels[1]} on page ${c.page}` }));
+    rows.filter(r => r.channel == null).forEach(r => issues.push({ type: 'missing', msg: `${r.universe}.${r.address} has no channel number next to it` }));
+    const seen = new Map();
+    rows.forEach(r => { if (r.channel != null) { const k = r.channel; seen.set(k, (seen.get(k) || []).concat(r.universe + '.' + r.address)); } });
+    for (const [ch, list] of seen) if (list.length > 1) issues.push({ type: 'duplicate', msg: `Channel ${ch} is on ${list.join(' and ')}` });
+    // gaps inside a run of channels (e.g. 501,502,504)
+    const chs = [...seen.keys()].sort((a, b) => a - b);
+    for (let i = 1; i < chs.length; i++) {
+      const g = chs[i] - chs[i - 1];
+      if (g > 1 && g < 5 && Math.floor(chs[i] / 100) === Math.floor(chs[i - 1] / 100)) {
+        const missing = []; for (let c = chs[i - 1] + 1; c < chs[i]; c++) missing.push(c);
+        issues.push({ type: 'gap', msg: `Channel ${missing.join(', ')} not found between ${chs[i - 1]} and ${chs[i]}` });
+      }
+    }
+    return { rows, issues };
+  }
+
+  function sortForLabels(rows) {
+    return rows.slice().sort((a, b) => (a.channel ?? 1e9) - (b.channel ?? 1e9) || a.universe - b.universe || a.address - b.address);
+  }
+
+  /* ---------- 4. Word document on the Avery 16-per-sheet layout ----------
+     A4, 8 rows × 3 columns (column 2 is a 3 mm gutter), cells 9.906 × 3.387 cm,
+     paragraph style "Avery Style 1", cells vertically centred. One table per sheet,
+     separated by a 1 pt page-break paragraph so sheets don't drift. */
+  const TW = { cellW: 5616, gutter: 170, rowH: 1920, pageW: 11906, pageH: 16838 };
+  TW.marginX = Math.round((TW.pageW - (TW.cellW * 2 + TW.gutter)) / 2);   // ≈ 4.4 mm
+  TW.marginTop = Math.round((TW.pageH - TW.rowH * 8) / 2);                // ≈ 13 mm
+
+  function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
+  function para(text, halfPts, bold) {
+    if (text === '' || text == null) return `<w:p><w:pPr><w:pStyle w:val="AveryStyle1"/></w:pPr></w:p>`;
+    return `<w:p><w:pPr><w:pStyle w:val="AveryStyle1"/></w:pPr><w:r><w:rPr>${bold ? '<w:b/>' : ''}<w:sz w:val="${halfPts}"/><w:szCs w:val="${halfPts}"/></w:rPr><w:t xml:space="preserve">${esc(text)}</w:t></w:r></w:p>`;
+  }
+
+  function labelCell(lbl, border) {
+    const b = border === 'none' ? '' :
+      `<w:tcBorders>${['top', 'left', 'bottom', 'right'].map(s => `<w:${s} w:val="single" w:sz="4" w:space="0" w:color="${border === 'black' ? '000000' : 'C8C8C8'}"/>`).join('')}</w:tcBorders>`;
+    const body = lbl
+      ? para(lbl.fixture || '', 28, false) + para(lbl.channel != null ? String(lbl.channel) : '', 56, true) + para(lbl.universe + '.' + lbl.address, 28, false)
+      : para('', 28, false);
+    return `<w:tc><w:tcPr><w:tcW w:w="${TW.cellW}" w:type="dxa"/>${b}<w:vAlign w:val="center"/></w:tcPr>${body}</w:tc>`;
+  }
+  function gutterCell() {
+    return `<w:tc><w:tcPr><w:tcW w:w="${TW.gutter}" w:type="dxa"/><w:tcBorders><w:top w:val="nil"/><w:left w:val="nil"/><w:bottom w:val="nil"/><w:right w:val="nil"/></w:tcBorders></w:tcPr><w:p><w:pPr><w:pStyle w:val="AveryStyle1"/></w:pPr></w:p></w:tc>`;
+  }
+
+  function sheetTable(labels, border) {
+    let rowsXml = '';
+    for (let r = 0; r < 8; r++) {
+      const L = labels[r * 2], R = labels[r * 2 + 1];
+      rowsXml += `<w:tr><w:trPr><w:cantSplit/><w:trHeight w:val="${TW.rowH}" w:hRule="exact"/></w:trPr>${labelCell(L, border)}${gutterCell()}${labelCell(R, border)}</w:tr>`;
+    }
+    return `<w:tbl><w:tblPr><w:tblW w:w="${TW.cellW * 2 + TW.gutter}" w:type="dxa"/><w:tblLayout w:type="fixed"/>` +
+      `<w:tblBorders><w:top w:val="nil"/><w:left w:val="nil"/><w:bottom w:val="nil"/><w:right w:val="nil"/><w:insideH w:val="nil"/><w:insideV w:val="nil"/></w:tblBorders>` +
+      `<w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:left w:w="57" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/><w:right w:w="57" w:type="dxa"/></w:tblCellMar></w:tblPr>` +
+      `<w:tblGrid><w:gridCol w:w="${TW.cellW}"/><w:gridCol w:w="${TW.gutter}"/><w:gridCol w:w="${TW.cellW}"/></w:tblGrid>${rowsXml}</w:tbl>`;
+  }
+
+  const TINY_P = (brk) => `<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="20" w:lineRule="exact"/><w:rPr><w:sz w:val="2"/></w:rPr></w:pPr>${brk ? '<w:r><w:rPr><w:sz w:val="2"/></w:rPr><w:br w:type="page"/></w:r>' : ''}</w:p>`;
+
+  function documentXml(labels, border) {
+    const sheets = [];
+    for (let i = 0; i < Math.max(labels.length, 1); i += 16) sheets.push(labels.slice(i, i + 16));
+    let body = '';
+    sheets.forEach((s, i) => { body += sheetTable(s, border) + TINY_P(i < sheets.length - 1); });
+    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>${body}<w:sectPr><w:pgSz w:w="${TW.pageW}" w:h="${TW.pageH}"/><w:pgMar w:top="${TW.marginTop}" w:right="${TW.marginX}" w:bottom="0" w:left="${TW.marginX}" w:header="0" w:footer="0" w:gutter="0"/><w:cols w:space="720"/></w:sectPr></w:body></w:document>`;
+  }
+
+  const STYLES = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial" w:eastAsia="Arial"/><w:sz w:val="28"/><w:szCs w:val="28"/><w:lang w:val="en-GB"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults>
+<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+<w:style w:type="paragraph" w:customStyle="1" w:styleId="AveryStyle1"><w:name w:val="Avery Style 1"/><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/><w:ind w:left="0" w:right="0"/><w:jc w:val="center"/></w:pPr><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/><w:color w:val="000000"/></w:rPr></w:style>
+<w:style w:type="table" w:default="1" w:styleId="TableNormal"><w:name w:val="Normal Table"/><w:tblPr><w:tblInd w:w="0" w:type="dxa"/><w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:left w:w="0" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar></w:tblPr></w:style>
+</w:styles>`;
+
+  const CONTENT_TYPES = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/></Types>`;
+  const ROOT_RELS = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/></Relationships>`;
+  const DOC_RELS = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`;
+  const core = (title) => `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:title>${esc(title)}</dc:title><dc:creator>Kudos AV</dc:creator></cp:coreProperties>`;
+
+  /* labels: [{fixture, channel, universe, address}] already in print order.
+     opts: {border:'none'|'grey'|'black', title}. Returns a Promise of a Blob/Uint8Array via JSZip. */
+  function buildDocx(JSZip, labels, opts) {
+    opts = opts || {};
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', CONTENT_TYPES);
+    zip.file('_rels/.rels', ROOT_RELS);
+    zip.file('word/_rels/document.xml.rels', DOC_RELS);
+    zip.file('word/document.xml', documentXml(labels, opts.border || 'grey'));
+    zip.file('word/styles.xml', STYLES);
+    zip.file('docProps/core.xml', core(opts.title || 'Lighting Labels'));
+    return zip.generateAsync({ type: opts.type || 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+  }
+
+  /* Symbol key lines such as "Ayrton Perseo Profile S 6" -> fixture names shown on the drawing */
+  const BRANDS = /^(Robe|Martin|Ayrton|Chauvet|Astera|LEDJ|Prolights|GLP|Cameo|Elation|Clay ?Paky|ETC|Look Solutions|SGM|Showtec|ADJ|Varytec|Claypaky|High End|Vari-?Lite|Acme|Portman|Ambersphere|Rosco|Litecraft|Briteq)\b/i;
+  function extractLegend(words) {
+    const out = new Map();
+    for (const w of words) {
+      const s = w.str.replace(/\s+/g, ' ').trim();
+      const m = s.match(/^(.*?\S)\s+(\d{1,3})$/);
+      const name = m ? m[1] : s;
+      if (BRANDS.test(name) && name.length < 60 && !/\d+\/\d+/.test(name)) out.set(name, m ? +m[2] : null);
+    }
+    return [...out].map(([name, count]) => ({ name, count }));
+  }
+
+  const api = { FIXTURE_LIBRARY, extractTokens, extractLegend, pairTokens, buildRows, sortForLabels, buildDocx, mergeRuns, _TW: TW };
+  if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.KudosLabels = api;
+})(this);
+
+</script>
+<script>
+(function () {
+  'use strict';
+  const K = window.KudosLabels;
+  const $ = (id) => document.getElementById(id);
+  if (window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+  // ---------- fixture library (built-in + this browser's additions) ----------
+  const LS_KEY = 'kudos-labels-fixtures-v1';
+  function loadCustom() { try { return JSON.parse(localStorage.getItem(LS_KEY) || '[]'); } catch (e) { return []; } }
+  function saveCustom(list) { try { localStorage.setItem(LS_KEY, JSON.stringify(list)); } catch (e) {} }
+  let custom = loadCustom();
+  const library = () => K.FIXTURE_LIBRARY.concat(custom);
+  const fxLabel = (f) => f.name + ' (' + f.mode + ')';
+
+  // ---------- state ----------
+  let rows = [];        // {id, channel, universe, address, footprint, fixture, auto}
+  let issues = [];
+  let legend = [];
+  let nextId = 1;
+  let isExample = true;
+
+  // Example: the IKSV NHM Hintze Hall labels, so the page opens working
+  const EX = [
+    [501,5,1,'Robe LEDBeam 350 (Mode 1)'],[502,5,23,'Robe LEDBeam 350 (Mode 1)'],[503,5,45,'Ayrton Perseo Profile S (Extended 61)'],[504,5,106,'Ayrton Perseo Profile S (Extended 61)'],
+    [505,5,167,'Martin MAC Aura XIP (Extended 57)'],[506,5,224,'Martin MAC Aura XIP (Extended 57)'],[507,5,281,'Robe Spikie (Mode 1)'],[508,5,308,'Robe Spikie (Mode 1)'],
+    [509,5,335,'Chauvet Color Strike M (Mode 74)'],[510,5,409,'LEDJ Spectra QX40 MKII (Mode 25)'],
+    [601,6,1,'Robe LEDBeam 350 (Mode 1)'],[602,6,23,'Robe LEDBeam 350 (Mode 1)'],[603,6,45,'Ayrton Perseo Profile S (Extended 61)'],[604,6,106,'Ayrton Perseo Profile S (Extended 61)'],
+    [605,6,167,'Martin MAC Aura XIP (Extended 57)'],[606,6,224,'Martin MAC Aura XIP (Extended 57)'],[607,6,281,'Robe Spikie (Mode 1)'],[608,6,308,'Robe Spikie (Mode 1)'],
+    [609,6,335,'Chauvet Color Strike M (Mode 74)'],[610,6,409,'LEDJ Spectra QX40 MKII (Mode 25)']];
+  function loadExample() {
+    rows = EX.map(([c, u, a, f]) => ({ id: nextId++, channel: c, universe: u, address: a, fixture: f, auto: false }));
+    recompute(); issues = []; legend = [];
+    $('job').value = ''; $('job').placeholder = '10th October - NHM - HH - IKSV';
+  }
+
+  function recompute() {
+    rows.sort((p, q) => p.universe - q.universe || p.address - q.address);
+    rows.forEach((r, i) => { const n = rows[i + 1]; r.footprint = (n && n.universe === r.universe) ? n.address - r.address : null; });
+  }
+
+  // ---------- PDF reading ----------
+  async function readPdf(file) {
+    if (!window.pdfjsLib) { setStatus('The PDF reader did not load. Check the connection and reload the page.'); return; }
+    setStatus('Reading ' + file.name + '…');
+    try {
+      const buf = await file.arrayBuffer();
+      const doc = await pdfjsLib.getDocument({ data: new Uint8Array(buf) }).promise;
+      const pages = []; const words = [];
+      for (let p = 1; p <= doc.numPages; p++) {
+        const tc = await (await doc.getPage(p)).getTextContent();
+        const t = K.extractTokens(tc.items, p);
+        pages.push(t); words.push(...t.words);
+      }
+      const res = K.buildRows(pages, library());
+      legend = K.extractLegend(words);
+      rows = res.rows.map(r => ({ id: nextId++, channel: r.channel, universe: r.universe, address: r.address, fixture: r.fixture, auto: !!r.fixture, guessFp: r.footprintGuess }));
+      issues = res.issues;
+      recompute();
+      isExample = false;
+      const jobGuess = file.name.replace(/\.pdf$/i, '').replace(/\s*-?\s*(lighting\s*)?(pack|patch|plan)s?\s*(v\d+)?\s*$/i, '').trim();
+      if (!$('job').value) $('job').value = jobGuess;
+      setStatus(rows.length
+        ? `Read ${doc.numPages} page${doc.numPages > 1 ? 's' : ''} and found ${rows.length} patched fixture${rows.length > 1 ? 's' : ''}.`
+        : 'No DMX addresses (like 2/177) were found. If the PDF is a scan or the text was turned into outlines, export it again from Vectorworks with text kept as text.');
+      render();
+    } catch (e) {
+      setStatus('Could not read that PDF (' + (e && e.message || e) + '). Try exporting it again from Vectorworks.');
+    }
+  }
+  function setStatus(s) { $('status').textContent = s; }
+
+  // ---------- rendering ----------
+  function render() {
+    $('exampleTag').hidden = !isExample;
+    renderChecks(); renderTable(); renderSheets(); renderLib();
+  }
+
+  function liveIssues() {
+    const out = issues.filter(i => i.type === 'conflict').slice();
+    const missingCh = rows.filter(r => r.channel == null || r.channel === '');
+    missingCh.forEach(r => out.push({ type: 'missing', msg: `${r.universe}.${r.address} has no channel number. Add it in the table.` }));
+    const by = new Map();
+    rows.forEach(r => { if (r.channel) by.set(r.channel, (by.get(r.channel) || []).concat(r.universe + '.' + r.address)); });
+    for (const [ch, l] of by) if (l.length > 1) out.push({ type: 'duplicate', msg: `Channel ${ch} appears ${l.length} times (${l.join(', ')}).` });
+    const chs = [...by.keys()].sort((a, b) => a - b);
+    for (let i = 1; i < chs.length; i++) { const g = chs[i] - chs[i - 1];
+      if (g > 1 && g < 5 && Math.floor(chs[i] / 100) === Math.floor(chs[i - 1] / 100)) {
+        const m = []; for (let c = chs[i - 1] + 1; c < chs[i]; c++) m.push(c);
+        out.push({ type: 'gap', msg: `Channel ${m.join(', ')} missing between ${chs[i - 1]} and ${chs[i]}. Check the plan for an unlabelled fixture.` }); } }
+    const noFx = rows.filter(r => !r.fixture).length;
+    if (noFx) out.push({ type: 'fixture', msg: `${noFx} label${noFx > 1 ? 's' : ''} still need a fixture name.` });
+    const auto = rows.filter(r => r.fixture && r.auto).length;
+    if (auto) out.push({ type: 'auto', msg: `${auto} fixture name${auto > 1 ? 's were' : ' was'} filled from channel count. Confirm against the drawing's legend.` });
+    const last = rows.filter(r => r.footprint == null && r.fixture && r.auto).length;
+    if (last) out.push({ type: 'auto', msg: `The last fixture in each universe has no spacing to measure, so its type is a guess.` });
+    return out;
+  }
+
+  function renderChecks() {
+    const list = liveIssues(); const ul = $('checks'); ul.textContent = '';
+    if (!list.length) { const li = document.createElement('li'); li.innerHTML = '<span class="dot ok"></span>'; li.append(rows.length ? `All ${rows.length} labels have a channel, address and fixture. No duplicates or gaps.` : 'Load a patch PDF to start.'); ul.append(li); }
+    list.forEach(i => { const li = document.createElement('li'); const d = document.createElement('span');
+      d.className = 'dot ' + (['auto', 'gap'].includes(i.type) ? 'warn' : 'bad'); li.append(d, i.msg); ul.append(li); });
+    $('legendBox').hidden = !legend.length; const lg = $('legend'); lg.textContent = '';
+    legend.forEach(l => { const c = document.createElement('span'); c.className = 'chip'; c.textContent = l.name + (l.count != null ? ' × ' + l.count : ''); lg.append(c); });
+    const dl = $('fxlist'); dl.textContent = '';
+    const names = new Set(library().map(fxLabel)); legend.forEach(l => names.add(l.name));
+    rows.forEach(r => r.fixture && names.add(r.fixture));
+    [...names].sort().forEach(n => { const o = document.createElement('option'); o.value = n; dl.append(o); });
+  }
+
+  function renderTable() {
+    const tb = $('tbody'); tb.textContent = '';
+    rows.forEach(r => {
+      const tr = document.createElement('tr');
+      if (!r.fixture || !r.channel) tr.className = 'need'; else if (r.auto) tr.className = 'check';
+      const ch = document.createElement('input'); ch.type = 'number'; ch.id = 'ch-' + r.id; ch.value = r.channel ?? ''; ch.setAttribute('aria-label', 'Channel for ' + r.universe + '.' + r.address);
+      ch.addEventListener('change', () => { r.channel = ch.value ? +ch.value : null; renderChecks(); renderSheets(); tr.className = (!r.fixture || !r.channel) ? 'need' : r.auto ? 'check' : ''; });
+      const td1 = document.createElement('td'); td1.append(ch);
+
+      const td2 = document.createElement('td'); td2.className = 'mono';
+      const uIn = document.createElement('input'); uIn.type = 'text'; uIn.id = 'ad-' + r.id; uIn.value = r.universe + '.' + r.address; uIn.style.width = '90px'; uIn.className = 'mono'; uIn.setAttribute('aria-label', 'DMX address');
+      uIn.addEventListener('change', () => { const m = uIn.value.trim().match(/^(\d{1,2})\s*[.\/]\s*(\d{1,3})$/);
+        if (m) { r.universe = +m[1]; r.address = +m[2]; recompute(); render(); } else { toast('Write the address as universe.address, for example 2.177'); uIn.value = r.universe + '.' + r.address; } });
+      td2.append(uIn);
+
+      const td3 = document.createElement('td'); td3.className = 'mono'; td3.textContent = r.footprint ?? (r.guessFp ? '≈' + r.guessFp : '—');
+
+      const td4 = document.createElement('td');
+      const fx = document.createElement('input'); fx.type = 'text'; fx.className = 'fx'; fx.id = 'fx-' + r.id; fx.value = r.fixture || ''; fx.setAttribute('list', 'fxlist'); fx.placeholder = 'Fixture name (Mode)'; fx.setAttribute('aria-label', 'Fixture for ' + r.universe + '.' + r.address);
+      fx.addEventListener('change', () => {
+        r.fixture = fx.value.trim(); r.auto = false;
+        let n = 0;
+        if (r.fixture && r.footprint != null) rows.forEach(o => { if (o !== r && !o.fixture && o.universe === r.universe && o.footprint === r.footprint) { o.fixture = r.fixture; o.auto = true; n++; } });
+        if (n) toast(`Also filled ${n} blank row${n > 1 ? 's' : ''} with the same ${r.footprint}-channel spacing in universe ${r.universe}.`);
+        render();
+      });
+      td4.append(fx);
+
+      const td5 = document.createElement('td');
+      if (!r.fixture) td5.innerHTML = '<span class="tag miss">Needs fixture</span>';
+      else if (r.auto) { const b = document.createElement('button'); b.type = 'button'; b.className = 'link'; b.textContent = 'Confirm'; b.title = 'Mark this fixture name as checked';
+        b.addEventListener('click', () => { r.auto = false; render(); }); td5.append(b); }
+
+      const td6 = document.createElement('td'); const del = document.createElement('button'); del.type = 'button'; del.className = 'del'; del.textContent = '×'; del.setAttribute('aria-label', 'Remove label ' + (r.channel || ''));
+      del.addEventListener('click', () => { rows = rows.filter(o => o !== r); recompute(); render(); });
+      td6.append(del);
+      tr.append(td1, td2, td3, td4, td5, td6); tb.append(tr);
+    });
+    if (!rows.length) { const tr = document.createElement('tr'); const td = document.createElement('td'); td.colSpan = 6; td.className = 'status'; td.textContent = 'No labels yet.'; tr.append(td); tb.append(tr); }
+  }
+
+  function printOrder() { return rows.slice().sort((a, b) => (a.channel || 1e9) - (b.channel || 1e9) || a.universe - b.universe || a.address - b.address); }
+
+  function renderSheets() {
+    const box = $('sheets'); box.textContent = '';
+    const list = printOrder(); const border = $('border').value;
+    const n = Math.max(1, Math.ceil(list.length / 16));
+    for (let s = 0; s < n; s++) {
+      const fig = document.createElement('figure'); fig.style.margin = '0';
+      const sh = document.createElement('div'); sh.className = 'sheet';
+      for (let i = 0; i < 16; i++) {
+        const r = list[s * 16 + i];
+        const cell = document.createElement('div'); cell.className = 'lbl' + (border !== 'none' ? ' b-' + border : '') + (r && !r.fixture ? ' empty' : '');
+        cell.style.gridColumn = (i % 2 === 0) ? '1' : '3'; cell.style.gridRow = String(Math.floor(i / 2) + 1);
+        if (r) { const a = document.createElement('div'); a.className = 'n'; a.textContent = r.fixture || 'Fixture needed';
+          const b = document.createElement('div'); b.className = 'c'; b.textContent = r.channel ?? '???';
+          const c = document.createElement('div'); c.className = 'a'; c.textContent = r.universe + '.' + r.address; cell.append(a, b, c); }
+        sh.append(cell);
+      }
+      const cap = document.createElement('figcaption'); cap.className = 'sheetcap'; cap.textContent = `Sheet ${s + 1} of ${n}`;
+      fig.append(sh, cap); box.append(fig);
+    }
+  }
+
+  function renderLib() {
+    const box = $('libList'); box.textContent = '';
+    library().slice().sort((a, b) => a.name.localeCompare(b.name)).forEach(f => {
+      const c = document.createElement('span'); c.className = 'chip'; c.textContent = `${fxLabel(f)} · ${f.footprint} ch`;
+      if (custom.includes(f)) { const x = document.createElement('button'); x.type = 'button'; x.className = 'del'; x.textContent = '×'; x.setAttribute('aria-label', 'Remove ' + fxLabel(f));
+        x.addEventListener('click', () => { custom = custom.filter(o => o !== f); saveCustom(custom); renderLib(); renderChecks(); }); c.append(x); }
+      box.append(c);
+    });
+  }
+
+  // ---------- download ----------
+  async function download() {
+    const list = printOrder();
+    if (!list.length) { toast('There are no labels to download yet.'); return; }
+    const blank = list.filter(r => !r.fixture).length;
+    const job = ($('job').value.trim() || 'Lighting');
+    const filename = job.replace(/[\\/:*?"<>|]+/g, '-') + ' - Lighting Labels.docx';
+    const btn = $('download'); btn.disabled = true;
+    try {
+      const blob = await K.buildDocx(JSZip, list.map(r => ({ fixture: r.fixture, channel: r.channel, universe: r.universe, address: r.address })), { border: $('border').value, title: job + ' - Lighting Labels' });
+      const dl = window.claude && window.claude.use ? await window.claude.use('downloads') : null;
+      if (dl) {
+        try { await dl.save({ filename, data: blob }); toast('Saved ' + filename); }
+        catch (e) { if (e && e.code !== 'declined') toast('The file could not be saved here (' + (e.code || 'error') + ').'); }
+      } else {
+        const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename; document.body.append(a); a.click();
+        setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+        toast('Downloaded ' + filename);
+      }
+      if (blank) setTimeout(() => toast(`${blank} label${blank > 1 ? 's have' : ' has'} no fixture name.`), 2600);
+    } finally { btn.disabled = false; }
+  }
+
+  let toastT;
+  function toast(msg) { const t = $('toast'); t.textContent = msg; t.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => t.hidden = true, 3200); }
+
+  // ---------- wiring ----------
+  const drop = $('drop');
+  $('file').addEventListener('change', (e) => { const f = e.target.files[0]; if (f) readPdf(f); e.target.value = ''; });
+  ['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove('over'); }));
+  drop.addEventListener('drop', (e) => { const f = [...(e.dataTransfer.files || [])].find(f => /pdf$/i.test(f.type) || /\.pdf$/i.test(f.name)); if (f) readPdf(f); else toast('That is not a PDF.'); });
+  $('border').addEventListener('change', renderSheets);
+  $('download').addEventListener('click', download);
+  $('addRow').addEventListener('click', () => {
+    const last = rows[rows.length - 1];
+    rows.push({ id: nextId++, channel: null, universe: last ? last.universe : 1, address: last ? Math.min(512, last.address + (last.footprint || 1)) : 1, fixture: '', auto: false });
+    recompute(); render();
+  });
+  $('nfAdd').addEventListener('click', () => {
+    const name = $('nfName').value.trim(), mode = $('nfMode').value.trim(), ch = +$('nfCh').value;
+    if (!name || !mode || !(ch >= 1 && ch <= 512)) { toast('Enter a fixture, a mode and its channel count.'); return; }
+    custom.push({ name, mode, footprint: ch }); saveCustom(custom);
+    $('nfName').value = $('nfMode').value = $('nfCh').value = '';
+    let n = 0; rows.forEach(r => { if (!r.fixture && r.footprint === ch) { r.fixture = name + ' (' + mode + ')'; r.auto = true; n++; } });
+    render(); toast('Added ' + name + ' (' + mode + ')' + (n ? ` and filled ${n} matching row${n > 1 ? 's' : ''}.` : '.'));
+  });
+
+  loadExample(); render();
+})();
+</script>
+
+</body>
+</html>
