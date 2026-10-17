@@ -1,6 +1,6 @@
 # Kudos Lighting Labels
 
-Turns a Vectorworks lighting patch PDF into fixture labels on Avery 16-per-sheet stickers (99 × 34 mm), downloaded as a Word file.
+Turns a Vectorworks lighting patch PDF into fixture labels on Avery 16-per-sheet stickers (99 × 34 mm). Print them straight from the browser, or download them as PDF or Word.
 
 Each label has three centred lines:
 
@@ -16,7 +16,12 @@ Labels print in channel order.
 2. Drop in the patch PDF. The whole lighting pack is fine; every page is read and repeated patches are merged.
 3. Read the **Checks** panel: missing channels, duplicates, gaps and any fixture names filled in automatically.
 4. Fix anything in the table. Setting a fixture on one row fills the blank rows with the same address spacing in that universe.
-5. Pick the border style and **Download Word labels**.
+5. Pick the border style, then:
+   - **Print labels** opens the browser's print dialog with exact A4 sheets. Set scale to 100% / Actual size and margins to None.
+   - **Download PDF** gives a print-ready file. Print it at Actual size.
+   - **Download Word** gives the editable .docx on the Kudos Avery template.
+
+   All three use the same grid, so they land on the same stickers. Print one plain sheet first and hold it against a sticker sheet.
 
 Always check flagged rows against the plan before printing.
 
@@ -42,7 +47,7 @@ Matches the Kudos Avery template: A4, 8 rows × 3 columns (column 2 is a 3 mm gu
 | `src/index.src.html` | Page source; `/*@@CORE@@*/` is replaced by `core.js`. |
 | `build.mjs` | `node build.mjs` rebuilds `index.html`. |
 
-Libraries load from cdnjs: pdf.js 3.11.174 and JSZip 3.10.1. Nothing is uploaded anywhere; the PDF is read in the browser.
+Libraries load from cdnjs: pdf.js 3.11.174, JSZip 3.10.1 and jsPDF 2.5.1. Nothing is uploaded anywhere; the PDF is read in the browser.
 
 ## Adding fixture modes
 
@@ -53,10 +58,11 @@ Edit `FIXTURE_LIBRARY` at the top of `core.js` (name, mode, channel count), then
 This goes into the Kudos CRM alongside the LED configurator. It is a static page with no server side, so any of these work:
 
 - Serve `index.html` as-is from the CRM (or embed it in an iframe on a CRM page).
-- Lift the markup, styles and two scripts out of `index.html` into a CRM page. It needs three libraries from cdnjs: pdf.js 3.11.174 (`pdf.min.js` and `pdf.worker.min.js`) and JSZip 3.10.1.
+- Lift the markup, styles and two scripts out of `index.html` into a CRM page. It needs these libraries from cdnjs: pdf.js 3.11.174 (`pdf.min.js` and `pdf.worker.min.js`), JSZip 3.10.1 and jsPDF 2.5.1.
 - Use `core.js` on its own with the CRM's own UI:
   - `extractTokens(items, page)` turns pdf.js text items into address and channel tokens.
   - `buildRows(pages, library)` pairs them and returns rows plus the checks.
+  - `buildPdf(jsPDF, labels, {border, title})` returns the print-ready PDF.
   - `buildDocx(JSZip, labels, {border, title})` returns the Word file from a plain list of `{fixture, channel, universe, address}`. If the CRM already holds a job's fixtures, it can call this directly and skip the PDF.
 
 The fixture modes library is hard-coded in `core.js`, and page additions are kept in the browser's localStorage. If the CRM has a database, that list is the natural thing to move into it so everyone shares the same modes.

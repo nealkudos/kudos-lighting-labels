@@ -93,13 +93,34 @@ tr.check td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
 details summary { cursor: pointer; font-weight: 600; }
 .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(18px + env(safe-area-inset-bottom, 0px)); background: var(--fg); color: var(--bg); padding: 10px 16px; border-radius: 8px; font-weight: 500; max-width: calc(100% - 32px); z-index: 20; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.printhint { font-size: .85rem; color: var(--muted); }
+
+/* print layout: exact A4 sheets on the Avery 16-up grid (same geometry as the Word file) */
+#printArea { display: none; }
+@media print {
+  @page { size: A4 portrait; margin: 0; }
+  :root, html, body { padding: 0 !important; margin: 0 !important; background: #fff !important; }
+  body > *:not(#printArea) { display: none !important; }
+  #printArea { display: block; }
+  .psheet { position: relative; width: 210mm; height: 297mm; overflow: hidden; break-after: page; page-break-after: always; }
+  .psheet:last-child { break-after: auto; page-break-after: auto; }
+  .pcell { position: absolute; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;
+    font-family: Arial, Helvetica, sans-serif; color: #000; line-height: 1.15; overflow: hidden;
+    -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .pcell.b-grey { outline: 0.2mm solid #c8c8c8; outline-offset: -0.1mm; }
+  .pcell.b-black { outline: 0.2mm solid #000; outline-offset: -0.1mm; }
+  .pcell .pn { white-space: nowrap; }
+  .pcell .pc { font-size: 28pt; font-weight: 700; }
+  .pcell .pa { font-size: 14pt; }
+}
 </style>
 
 <div class="wrap">
   <header>
     <div>
       <h1>KUDOS <span>Lighting Labels</span></h1>
-      <p class="sub">Drop in the lighting patch PDF. Check the channels and fixtures. Download the Avery 16-per-sheet labels as Word.</p>
+      <p class="sub">Drop in the lighting patch PDF. Check the channels and fixtures. Print the Avery 16-per-sheet labels, or download them as PDF or Word.</p>
     </div>
   </header>
 
@@ -135,9 +156,11 @@ details summary { cursor: pointer; font-weight: 600; }
   <section class="panel" aria-labelledby="h-tbl">
     <div class="row" style="justify-content:space-between">
       <h2 id="h-tbl">3 · Patch <span id="exampleTag" class="example">Example — IKSV NHM</span></h2>
-      <div class="row">
+      <div class="actions">
         <button type="button" id="addRow">Add label</button>
-        <button type="button" class="primary" id="download">Download Word labels</button>
+        <button type="button" class="primary" id="print">Print labels</button>
+        <button type="button" id="pdf">Download PDF</button>
+        <button type="button" id="download">Download Word</button>
       </div>
     </div>
     <p class="status">Fixture names are matched from the address spacing. Amber rows were filled automatically and need a glance. Setting a fixture on one row fills the blank rows with the same footprint in that universe.</p>
@@ -163,14 +186,17 @@ details summary { cursor: pointer; font-weight: 600; }
 
   <section class="panel" aria-labelledby="h-prev">
     <h2 id="h-prev">4 · Sheet preview</h2>
+    <p class="printhint">When printing, set the scale to <strong>100% / Actual size</strong> and margins to <strong>None</strong>, and load the Avery 16-per-sheet stickers. Print one plain sheet first and hold it against a sticker sheet to check alignment.</p>
     <div class="sheets" id="sheets"></div>
   </section>
 </div>
 <div class="toast" id="toast" hidden></div>
+<div id="printArea" aria-hidden="true"></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script>
 /*@@CORE@@*/
 </script>
@@ -360,27 +386,90 @@ details summary { cursor: pointer; font-weight: 600; }
     });
   }
 
-  // ---------- download ----------
+  // ---------- outputs: Word, PDF, print ----------
+  // Inside claude.ai the page is sandboxed: no print dialog, and files go through the downloads capability.
+  const inClaude = !!(window.claude && window.claude.use);
+  const labelList = () => printOrder().map(r => ({ fixture: r.fixture, channel: r.channel, universe: r.universe, address: r.address }));
+  const jobName = () => ($('job').value.trim() || 'Lighting');
+  const baseName = () => jobName().replace(/[\\/:*?"<>|]+/g, '-') + ' - Lighting Labels';
+
+  async function saveFile(blob, filename) {
+    const dl = inClaude ? await window.claude.use('downloads') : null;
+    if (dl) {
+      try { await dl.save({ filename, data: blob }); toast('Saved ' + filename); return true; }
+      catch (e) { if (e && e.code !== 'declined') toast('The file could not be saved here (' + (e.code || 'error') + ').'); return false; }
+    }
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename; document.body.append(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+    toast('Downloaded ' + filename); return true;
+  }
+  function ready() {
+    if (!rows.length) { toast('There are no labels yet.'); return false; }
+    return true;
+  }
+  function warnBlank() {
+    const blank = rows.filter(r => !r.fixture).length;
+    if (blank) setTimeout(() => toast(`${blank} label${blank > 1 ? 's have' : ' has'} no fixture name.`), 2600);
+  }
+  async function withBusy(id, fn) { const b = $(id); b.disabled = true; try { await fn(); } finally { b.disabled = false; } }
+
   async function download() {
-    const list = printOrder();
-    if (!list.length) { toast('There are no labels to download yet.'); return; }
-    const blank = list.filter(r => !r.fixture).length;
-    const job = ($('job').value.trim() || 'Lighting');
-    const filename = job.replace(/[\\/:*?"<>|]+/g, '-') + ' - Lighting Labels.docx';
-    const btn = $('download'); btn.disabled = true;
-    try {
-      const blob = await K.buildDocx(JSZip, list.map(r => ({ fixture: r.fixture, channel: r.channel, universe: r.universe, address: r.address })), { border: $('border').value, title: job + ' - Lighting Labels' });
-      const dl = window.claude && window.claude.use ? await window.claude.use('downloads') : null;
-      if (dl) {
-        try { await dl.save({ filename, data: blob }); toast('Saved ' + filename); }
-        catch (e) { if (e && e.code !== 'declined') toast('The file could not be saved here (' + (e.code || 'error') + ').'); }
-      } else {
-        const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename; document.body.append(a); a.click();
-        setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
-        toast('Downloaded ' + filename);
+    if (!ready()) return;
+    await withBusy('download', async () => {
+      const blob = await K.buildDocx(JSZip, labelList(), { border: $('border').value, title: baseName() });
+      if (await saveFile(blob, baseName() + '.docx')) warnBlank();
+    });
+  }
+
+  function pdfBlob() {
+    if (!window.jspdf) throw new Error('The PDF library did not load. Check the connection and reload.');
+    return K.buildPdf(window.jspdf.jsPDF, labelList(), { border: $('border').value, title: baseName() }).output('blob');
+  }
+  async function downloadPdf() {
+    if (!ready()) return;
+    await withBusy('pdf', async () => {
+      try { if (await saveFile(pdfBlob(), baseName() + '.pdf')) warnBlank(); } catch (e) { toast(e.message); }
+    });
+  }
+
+  // Browser print: build exact-size sheets in #printArea and open the print dialog.
+  const measureCtx = document.createElement('canvas').getContext('2d');
+  const measureMm = (t, pt) => { measureCtx.font = pt + 'pt Arial, Helvetica, sans-serif'; return measureCtx.measureText(t).width * 25.4 / 96; };
+  function buildPrintArea() {
+    const G = K.GEO, list = labelList(), border = $('border').value, area = $('printArea');
+    area.textContent = '';
+    const n = Math.max(1, Math.ceil(list.length / 16));
+    for (let s = 0; s < n; s++) {
+      const sh = document.createElement('div'); sh.className = 'psheet';
+      for (let i = 0; i < 16; i++) {
+        const o = K.cellOrigin(i), L = list[s * 16 + i];
+        const c = document.createElement('div'); c.className = 'pcell' + (border !== 'none' ? ' b-' + border : '');
+        Object.assign(c.style, { left: o.x + 'mm', top: o.y + 'mm', width: G.cellW + 'mm', height: G.cellH + 'mm' });
+        if (L) {
+          const a = document.createElement('div'); a.className = 'pn'; a.textContent = L.fixture || '';
+          a.style.fontSize = K.fitNamePt(L.fixture || '', measureMm) + 'pt'; a.style.minHeight = '1.15em';
+          const b = document.createElement('div'); b.className = 'pc'; b.textContent = L.channel ?? '';
+          const d = document.createElement('div'); d.className = 'pa'; d.textContent = L.universe + '.' + L.address;
+          c.append(a, b, d);
+        }
+        sh.append(c);
       }
-      if (blank) setTimeout(() => toast(`${blank} label${blank > 1 ? 's have' : ' has'} no fixture name.`), 2600);
-    } finally { btn.disabled = false; }
+      area.append(sh);
+    }
+  }
+  async function printLabels() {
+    if (!ready()) return;
+    if (inClaude) {
+      // The claude.ai preview cannot open the print dialog, so hand over the print-ready PDF instead.
+      toast('Printing is blocked in this preview, so here is the PDF to print.');
+      await withBusy('print', async () => { try { await saveFile(pdfBlob(), baseName() + '.pdf'); } catch (e) { toast(e.message); } });
+      return;
+    }
+    buildPrintArea();
+    const prevTitle = document.title; document.title = baseName();
+    window.print();
+    setTimeout(() => { document.title = prevTitle; }, 1000);
+    warnBlank();
   }
 
   let toastT;
@@ -394,6 +483,9 @@ details summary { cursor: pointer; font-weight: 600; }
   drop.addEventListener('drop', (e) => { const f = [...(e.dataTransfer.files || [])].find(f => /pdf$/i.test(f.type) || /\.pdf$/i.test(f.name)); if (f) readPdf(f); else toast('That is not a PDF.'); });
   $('border').addEventListener('change', renderSheets);
   $('download').addEventListener('click', download);
+  $('pdf').addEventListener('click', downloadPdf);
+  $('print').addEventListener('click', printLabels);
+  if (inClaude) $('print').textContent = 'Print labels (PDF)';
   $('addRow').addEventListener('click', () => {
     const last = rows[rows.length - 1];
     rows.push({ id: nextId++, channel: null, universe: last ? last.universe : 1, address: last ? Math.min(512, last.address + (last.footprint || 1)) : 1, fixture: '', auto: false });

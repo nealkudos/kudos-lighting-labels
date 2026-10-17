@@ -254,6 +254,61 @@
     return zip.generateAsync({ type: opts.type || 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
   }
 
+  /* ---------- 5. Print geometry (mm) shared by the PDF and the browser print layout ----------
+     Same grid as the Word file, so all three outputs land on the same stickers. */
+  const MM = (tw) => tw * 25.4 / 1440;
+  const GEO = {
+    pageW: 210, pageH: 297,
+    top: MM(TW.marginTop), left: MM(TW.marginX),
+    cellW: MM(TW.cellW), cellH: MM(TW.rowH), gutter: MM(TW.gutter),
+    pt: { name: 14, chan: 28, addr: 14, minName: 8 }
+  };
+  const PT_MM = 25.4 / 72;
+  function cellOrigin(i) {   // i = 0..15 on a sheet
+    const col = i % 2, row = Math.floor(i / 2);
+    return { x: GEO.left + col * (GEO.cellW + GEO.gutter), y: GEO.top + row * GEO.cellH };
+  }
+  /* Font size for the fixture line so it fits on one line; measure(text, pt) returns width in mm */
+  function fitNamePt(text, measure) {
+    const max = GEO.cellW - 4;
+    let pt = GEO.pt.name;
+    while (pt > GEO.pt.minName && measure(text, pt) > max) pt -= 0.5;
+    return pt;
+  }
+
+  /* labels as for buildDocx. jsPDF: the jsPDF constructor. Returns the jsPDF document. */
+  function buildPdf(jsPDF, labels, opts) {
+    opts = opts || {};
+    const doc = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
+    doc.setProperties({ title: opts.title || 'Lighting Labels', creator: 'Kudos AV' });
+    const measure = (t, pt) => { doc.setFontSize(pt); return doc.getTextWidth(t); };
+    const sheets = Math.max(1, Math.ceil(labels.length / 16));
+    for (let s = 0; s < sheets; s++) {
+      if (s) doc.addPage('a4', 'portrait');
+      for (let i = 0; i < 16; i++) {
+        const { x, y } = cellOrigin(i);
+        if (opts.border && opts.border !== 'none') {
+          doc.setDrawColor(opts.border === 'black' ? 0 : 200); doc.setLineWidth(0.2);
+          doc.rect(x, y, GEO.cellW, GEO.cellH);
+        }
+        const L = labels[s * 16 + i]; if (!L) continue;
+        const namePt = fitNamePt(L.fixture || '', measure);
+        const lh = (pt) => pt * PT_MM * 1.15;
+        const hName = lh(GEO.pt.name), hChan = lh(GEO.pt.chan), hAddr = lh(GEO.pt.addr);
+        const y0 = y + (GEO.cellH - (hName + hChan + hAddr)) / 2;
+        const cx = x + GEO.cellW / 2;
+        doc.setTextColor(0);
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(namePt);
+        if (L.fixture) doc.text(L.fixture, cx, y0 + hName * 0.78, { align: 'center' });
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(GEO.pt.chan);
+        if (L.channel != null) doc.text(String(L.channel), cx, y0 + hName + hChan * 0.8, { align: 'center' });
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(GEO.pt.addr);
+        doc.text(L.universe + '.' + L.address, cx, y0 + hName + hChan + hAddr * 0.78, { align: 'center' });
+      }
+    }
+    return doc;
+  }
+
   /* Symbol key lines such as "Ayrton Perseo Profile S 6" -> fixture names shown on the drawing */
   const BRANDS = /^(Robe|Martin|Ayrton|Chauvet|Astera|LEDJ|Prolights|GLP|Cameo|Elation|Clay ?Paky|ETC|Look Solutions|SGM|Showtec|ADJ|Varytec|Claypaky|High End|Vari-?Lite|Acme|Portman|Ambersphere|Rosco|Litecraft|Briteq)\b/i;
   function extractLegend(words) {
@@ -267,6 +322,6 @@
     return [...out].map(([name, count]) => ({ name, count }));
   }
 
-  const api = { FIXTURE_LIBRARY, extractTokens, extractLegend, pairTokens, buildRows, sortForLabels, buildDocx, mergeRuns, _TW: TW };
+  const api = { FIXTURE_LIBRARY, extractTokens, extractLegend, pairTokens, buildRows, sortForLabels, buildDocx, buildPdf, fitNamePt, cellOrigin, GEO, mergeRuns, _TW: TW };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.KudosLabels = api;
 })(this);
