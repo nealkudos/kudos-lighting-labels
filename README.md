@@ -48,11 +48,15 @@ Libraries load from cdnjs: pdf.js 3.11.174 and JSZip 3.10.1. Nothing is uploaded
 
 Edit `FIXTURE_LIBRARY` at the top of `core.js` (name, mode, channel count), then run `node build.mjs`. Users can also add modes from the page; those stay in their browser only.
 
-## Putting it in Current RMS
+## Adding it to the Kudos CRM
 
-The tool is a static page, so it can be:
+This goes into the Kudos CRM alongside the LED configurator. It is a static page with no server side, so any of these work:
 
-- hosted on GitHub Pages and linked from Current RMS, or
-- loaded as a tab in the Kudos RMS extension (an iframe of the hosted page, or `core.js` plus the page markup dropped into the extension).
+- Serve `index.html` as-is from the CRM (or embed it in an iframe on a CRM page).
+- Lift the markup, styles and two scripts out of `index.html` into a CRM page. It needs three libraries from cdnjs: pdf.js 3.11.174 (`pdf.min.js` and `pdf.worker.min.js`) and JSZip 3.10.1.
+- Use `core.js` on its own with the CRM's own UI:
+  - `extractTokens(items, page)` turns pdf.js text items into address and channel tokens.
+  - `buildRows(pages, library)` pairs them and returns rows plus the checks.
+  - `buildDocx(JSZip, labels, {border, title})` returns the Word file from a plain list of `{fixture, channel, universe, address}`. If the CRM already holds a job's fixtures, it can call this directly and skip the PDF.
 
-If it should later pull fixtures from a Current RMS opportunity instead of the PDF, `buildDocx(JSZip, labels, {border, title})` in `core.js` takes a plain list of `{fixture, channel, universe, address}` and can be called directly.
+The fixture modes library is hard-coded in `core.js`, and page additions are kept in the browser's localStorage. If the CRM has a database, that list is the natural thing to move into it so everyone shares the same modes.
