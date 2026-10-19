@@ -352,11 +352,8 @@
   TW.marginX = Math.round((TW.pageW - (TW.cellW * 2 + TW.gutter)) / 2);   // ≈ 4.4 mm
   TW.marginTop = Math.round((TW.pageH - TW.rowH * 8) / 2);                // ≈ 13 mm
 
-  /* Bottom line of a label: "5.1", or "5.1 · LX 3" when the fixture's position is known and shown */
-  function addrLine(l) {
-    const a = l.universe != null ? l.universe + '.' + l.address : '';
-    return l.position ? (a ? a + ' \u00b7 ' + l.position : l.position) : a;
-  }
+  /* Label lines under the channel: the address ("5.1"), then the truss ("LX 3") on its own line when known and shown */
+  function addrLine(l) { return l.universe != null ? l.universe + '.' + l.address : ''; }
   function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
   function para(text, halfPts, bold) {
@@ -368,7 +365,7 @@
     const b = border === 'none' ? '' :
       `<w:tcBorders>${['top', 'left', 'bottom', 'right'].map(s => `<w:${s} w:val="single" w:sz="4" w:space="0" w:color="${border === 'black' ? '000000' : 'C8C8C8'}"/>`).join('')}</w:tcBorders>`;
     const body = lbl
-      ? para(lbl.fixture || '', 28, false) + para(lbl.channel != null ? String(lbl.channel) : '', 56, true) + para(addrLine(lbl), 28, false)
+      ? para(lbl.fixture || '', 28, false) + para(lbl.channel != null ? String(lbl.channel) : '', 56, true) + para(addrLine(lbl), 28, false) + (lbl.position ? para(lbl.position, 28, false) : '')
       : para('', 28, false);
     return `<w:tc><w:tcPr><w:tcW w:w="${TW.cellW}" w:type="dxa"/>${b}<w:vAlign w:val="center"/></w:tcPr>${body}</w:tc>`;
   }
@@ -470,8 +467,8 @@
         const L = labels[s * 16 + i]; if (!L) continue;
         const namePt = fitNamePt(L.fixture || '', measure);
         const lh = (pt) => pt * PT_MM * 1.15;
-        const hName = lh(GEO.pt.name), hChan = lh(GEO.pt.chan), hAddr = lh(GEO.pt.addr);
-        const y0 = y + (GEO.cellH - (hName + hChan + hAddr)) / 2;
+        const hName = lh(GEO.pt.name), hChan = lh(GEO.pt.chan), hAddr = lh(GEO.pt.addr), hPos = L.position ? lh(GEO.pt.addr) : 0;
+        const y0 = y + (GEO.cellH - (hName + hChan + hAddr + hPos)) / 2;
         const cx = x + GEO.cellW / 2;
         doc.setTextColor(0);
         doc.setFont('helvetica', 'normal'); doc.setFontSize(namePt);
@@ -480,6 +477,7 @@
         if (L.channel != null) doc.text(String(L.channel), cx, y0 + hName + hChan * 0.8, { align: 'center' });
         doc.setFont('helvetica', 'normal'); doc.setFontSize(GEO.pt.addr);
         if (addrLine(L)) doc.text(addrLine(L), cx, y0 + hName + hChan + hAddr * 0.78, { align: 'center' });
+        if (L.position) doc.text(L.position, cx, y0 + hName + hChan + hAddr + hPos * 0.78, { align: 'center' });
       }
     }
     return doc;
