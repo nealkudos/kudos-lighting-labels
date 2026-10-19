@@ -190,6 +190,55 @@
     return out;
   }
 
+  /* ---------- 2d. Truss / position names (LX 1, LX2, Truss 3, FOH 1 …) ----------
+     labels: [{name, x, y, page}] in the same coordinates as that page's tokens. */
+  const POSITION_RE = /^(LX|TRUSS|BAR|PIPE|BOOM|FOH|TOWER|LADDER)\s*-?\s*(\d{1,2}[A-Z]?)$/i;
+  function positionName(text) {
+    const m = String(text).trim().replace(/[|.:]+$/, '').match(POSITION_RE);
+    if (!m) return null;
+    const head = m[1].toUpperCase();
+    const pretty = ['LX', 'FOH'].includes(head) ? head : head[0] + head.slice(1).toLowerCase();
+    return pretty + ' ' + m[2].toUpperCase();
+  }
+  function positionLabelsFromWords(words, page) {
+    const out = [];
+    words.forEach(w => { const n = positionName(w.str); if (n) { const c = centre(w); out.push({ name: n, x: c.x, y: c.y, page }); } });
+    return out;
+  }
+  /* Fixtures on one truss sit in a line: group addresses that line up across or down the page,
+     then give each group the nearest position name. */
+  function assignPositions(rows, labels) {
+    if (!labels.length) return;
+    const pages = [...new Set(labels.map(l => l.page))];
+    for (const page of pages) {
+      const labs = labels.filter(l => l.page === page);
+      const pts = [];
+      rows.forEach(r => (r.at || []).forEach(a => { if (a.page === page) pts.push({ r, x: a.x, y: a.y, em: a.size || 8 }); }));
+      if (!pts.length) continue;
+      const parent = pts.map((_, i) => i);
+      const find = (i) => parent[i] === i ? i : (parent[i] = find(parent[i]));
+      for (let i = 0; i < pts.length; i++) for (let j = i + 1; j < pts.length; j++) {
+        const a = pts[i], b = pts[j], em = Math.max(a.em, b.em);
+        const dx = Math.abs(a.x - b.x), dy = Math.abs(a.y - b.y);
+        if ((dy < 1.5 * em && dx < 14 * em) || (dx < 1.5 * em && dy < 14 * em)) parent[find(i)] = find(j);
+      }
+      const groups = new Map();
+      pts.forEach((p, i) => { const k = find(i); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(p); });
+      for (const g of groups.values()) {
+        const x0 = Math.min(...g.map(p => p.x)), x1 = Math.max(...g.map(p => p.x));
+        const y0 = Math.min(...g.map(p => p.y)), y1 = Math.max(...g.map(p => p.y));
+        const em = g[0].em;
+        let best = null;
+        labs.forEach(l => {
+          const dx = Math.max(0, x0 - l.x, l.x - x1), dy = Math.max(0, y0 - l.y, l.y - y1);
+          const d = Math.hypot(dx, dy);
+          if (!best || d < best.d) best = { d, name: l.name };
+        });
+        if (best && best.d < 30 * em) g.forEach(p => { if (!p.r.position) p.r.position = best.name; });
+      }
+    }
+  }
+
   /* ---------- 3. Merge pages into one row per DMX address, with checks ----------
      opts.legend: fixtures read from the drawing's key (name, mode, footprint, qty) — preferred over the library. */
   function buildRows(pagesTokens, library, opts) {
@@ -205,8 +254,10 @@
       for (const p of pairs) {
         const key = p.addr.universe + '/' + p.addr.address;
         const prev = byKey.get(key);
-        if (!prev) byKey.set(key, { universe: p.addr.universe, address: p.addr.address, channel: p.chan.channel, pages: [p.addr.page], ocr: !!pt.ocr });
+        const at = { page: p.addr.page, x: p.addr.x, y: p.addr.y, size: p.addr.size };
+        if (!prev) byKey.set(key, { universe: p.addr.universe, address: p.addr.address, channel: p.chan.channel, pages: [p.addr.page], at: [at], ocr: !!pt.ocr });
         else {
+          prev.at = (prev.at || []).concat(at);
           if (!prev.pages.includes(p.addr.page)) prev.pages.push(p.addr.page);
           if (prev.channel == null) prev.channel = p.chan.channel;
           else if (prev.channel !== p.chan.channel) conflicts.push({ key, channels: [prev.channel, p.chan.channel], page: p.addr.page });
@@ -214,7 +265,9 @@
       }
       for (const a of loneAddrs) {
         const key = a.universe + '/' + a.address;
-        if (!byKey.has(key)) byKey.set(key, { universe: a.universe, address: a.address, channel: null, pages: [a.page], ocr: !!pt.ocr });
+        const at = { page: a.page, x: a.x, y: a.y, size: a.size };
+        if (!byKey.has(key)) byKey.set(key, { universe: a.universe, address: a.address, channel: null, pages: [a.page], at: [at], ocr: !!pt.ocr });
+        else byKey.get(key).at.push(at);
       }
       pt.chans.forEach(c => { if (!pairedChans.has(c)) loneChans.push({ channel: c.channel, page: c.page, ocr: !!pt.ocr }); });
     }
@@ -256,6 +309,7 @@
       r.fromKey = fromKey.length === 1;
     });
 
+    assignPositions(rows, opts.positions || []);
     const all = rows.concat(orphanRows);
     return { rows: all, issues: checkRows(all, conflicts, legend) };
   }
@@ -298,6 +352,11 @@
   TW.marginX = Math.round((TW.pageW - (TW.cellW * 2 + TW.gutter)) / 2);   // ≈ 4.4 mm
   TW.marginTop = Math.round((TW.pageH - TW.rowH * 8) / 2);                // ≈ 13 mm
 
+  /* Bottom line of a label: "5.1", or "5.1 · LX 3" when the fixture's position is known and shown */
+  function addrLine(l) {
+    const a = l.universe != null ? l.universe + '.' + l.address : '';
+    return l.position ? (a ? a + ' \u00b7 ' + l.position : l.position) : a;
+  }
   function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
   function para(text, halfPts, bold) {
@@ -309,7 +368,7 @@
     const b = border === 'none' ? '' :
       `<w:tcBorders>${['top', 'left', 'bottom', 'right'].map(s => `<w:${s} w:val="single" w:sz="4" w:space="0" w:color="${border === 'black' ? '000000' : 'C8C8C8'}"/>`).join('')}</w:tcBorders>`;
     const body = lbl
-      ? para(lbl.fixture || '', 28, false) + para(lbl.channel != null ? String(lbl.channel) : '', 56, true) + para(lbl.universe != null ? lbl.universe + '.' + lbl.address : '', 28, false)
+      ? para(lbl.fixture || '', 28, false) + para(lbl.channel != null ? String(lbl.channel) : '', 56, true) + para(addrLine(lbl), 28, false)
       : para('', 28, false);
     return `<w:tc><w:tcPr><w:tcW w:w="${TW.cellW}" w:type="dxa"/>${b}<w:vAlign w:val="center"/></w:tcPr>${body}</w:tc>`;
   }
@@ -420,7 +479,7 @@
         doc.setFont('helvetica', 'bold'); doc.setFontSize(GEO.pt.chan);
         if (L.channel != null) doc.text(String(L.channel), cx, y0 + hName + hChan * 0.8, { align: 'center' });
         doc.setFont('helvetica', 'normal'); doc.setFontSize(GEO.pt.addr);
-        if (L.universe != null) doc.text(L.universe + '.' + L.address, cx, y0 + hName + hChan + hAddr * 0.78, { align: 'center' });
+        if (addrLine(L)) doc.text(addrLine(L), cx, y0 + hName + hChan + hAddr * 0.78, { align: 'center' });
       }
     }
     return doc;
@@ -439,6 +498,6 @@
     return [...out].map(([name, count]) => ({ name, count }));
   }
 
-  const api = { FIXTURE_LIBRARY, extractTokens, extractLegend, tokensFromOcrWords, unpairedChannels, parseLegendLines, cleanFixtureName, checkRows, dedupeWords, pairTokens, buildRows, sortForLabels, buildDocx, buildPdf, fitNamePt, cellOrigin, GEO, mergeRuns, _TW: TW };
+  const api = { addrLine, positionName, positionLabelsFromWords, assignPositions, FIXTURE_LIBRARY, extractTokens, extractLegend, tokensFromOcrWords, unpairedChannels, parseLegendLines, cleanFixtureName, checkRows, dedupeWords, pairTokens, buildRows, sortForLabels, buildDocx, buildPdf, fitNamePt, cellOrigin, GEO, mergeRuns, _TW: TW };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.KudosLabels = api;
 })(this);

@@ -144,6 +144,11 @@ details summary { cursor: pointer; font-weight: 600; }
     <div class="row">
       <div class="grow"><label class="f" for="job">Job name (used for the file name)
         <input type="text" id="job" placeholder="10th October - NHM - HH - IKSV"></label></div>
+      <div><label class="f" for="showPos">Truss on labels
+        <select id="showPos">
+          <option value="on">Show (e.g. 5.1 · LX 3)</option>
+          <option value="off">Hide</option>
+        </select></label></div>
       <div><label class="f" for="border">Label borders
         <select id="border">
           <option value="grey">Light grey cut line</option>
@@ -177,14 +182,15 @@ details summary { cursor: pointer; font-weight: 600; }
         <button type="button" id="download">Download Word</button>
       </div>
     </div>
-    <p class="status">Fixture names are matched from the address spacing. Amber rows were filled automatically and need a glance. Setting a fixture on one row fills the blank rows with the same footprint in that universe.</p>
+    <p class="status">Truss names (LX 1, LX 2…) are picked up from the plan when they are written on it. Fixture names are matched from the address spacing. Amber rows were filled automatically and need a glance. Setting a fixture on one row fills the blank rows with the same footprint in that universe.</p>
     <div class="tablewrap">
       <table>
-        <thead><tr><th>Channel</th><th>Address</th><th>Chs</th><th>Fixture (mode)</th><th></th><th></th></tr></thead>
+        <thead><tr><th>Channel</th><th>Address</th><th>Position</th><th>Chs</th><th>Fixture (mode)</th><th></th><th></th></tr></thead>
         <tbody id="tbody"></tbody>
       </table>
     </div>
     <datalist id="fxlist"></datalist>
+    <datalist id="poslist"></datalist>
     <details>
       <summary>Fixture modes library</summary>
       <p class="status">Used to name fixtures from their channel count. Your additions stay in this browser.</p>
@@ -245,7 +251,7 @@ details summary { cursor: pointer; font-weight: 600; }
     [605,6,167,'Martin MAC Aura XIP (Extended 57)'],[606,6,224,'Martin MAC Aura XIP (Extended 57)'],[607,6,281,'Robe Spikie (Mode 1)'],[608,6,308,'Robe Spikie (Mode 1)'],
     [609,6,335,'Chauvet Color Strike M (Mode 74)'],[610,6,409,'LEDJ Spectra QX40 MKII (Mode 25)']];
   function loadExample() {
-    rows = EX.map(([c, u, a, f]) => ({ id: nextId++, channel: c, universe: u, address: a, fixture: f, auto: false }));
+    rows = EX.map(([c, u, a, f]) => ({ id: nextId++, channel: c, universe: u, address: a, fixture: f, auto: false, position: '' }));
     recompute(); issues = []; legend = [];
     $('job').value = ''; $('job').placeholder = '10th October - NHM - HH - IKSV';
   }
@@ -405,10 +411,11 @@ details summary { cursor: pointer; font-weight: 600; }
         if (last && x.bbox.x0 - last.x1 < 1.2 * h) { last.words.push(x.text.trim()); last.x1 = x.bbox.x1; }
         else segs.push({ words: [x.text.trim()], x0: x.bbox.x0, x1: x.bbox.x1 }); });
       const best = segs.sort((a, b) => (b.words.join('').replace(/[^a-z]/gi, '').length) - (a.words.join('').replace(/[^a-z]/gi, '').length))[0];
-      return best ? { text: best.words.join(' '), x: best.x0 / keyScale, y: l.bbox.y0 / keyScale, h: h / keyScale } : null;
+      return best ? { text: best.words.join(' '), x: best.x0 / keyScale, y: l.bbox.y0 / keyScale, h: h / keyScale, w: (best.x1 - best.x0) / keyScale } : null;
     }).filter(Boolean);
     if (window.__kudosDebug) window.__kudosDebug.push(...data.lines.filter(l => /[a-z]{3}/i.test(l.text)).map(l => ({ r: l.bbox, rot: 'keyline', score: l.confidence, text: (l.words || []).map(x => x.text + '(' + Math.round(x.confidence) + ')@' + x.bbox.x0).join(' ') })), ...lines.map(l => ({ r: l, rot: 'kept', score: 0, text: l.text })));
-    return { tokens, legend: K.parseLegendLines(lines) };
+    const positions = lines.map(l => { const n = K.positionName(l.text); return n ? { name: n, x: l.x + l.w / 2, y: l.y + l.h / 2, page: pageNo } : null; }).filter(Boolean);
+    return { tokens, legend: K.parseLegendLines(lines), positions };
   }
   async function pageHasImages(page) {
     try { const ops = await page.getOperatorList(); const O = pdfjsLib.OPS;
@@ -426,7 +433,7 @@ details summary { cursor: pointer; font-weight: 600; }
     try {
       const buf = await file.arrayBuffer();
       const doc = await pdfjsLib.getDocument({ data: new Uint8Array(buf) }).promise;
-      const pages = []; const words = []; let legendFromKey = []; let pictured = 0; let ocrFailed = null;
+      const pages = []; const words = []; let legendFromKey = []; let pictured = 0; let ocrFailed = null; let positions = [];
       for (let p = 1; p <= doc.numPages; p++) {
         notice('working', `Reading page ${p} of ${doc.numPages}`, '', (p - 1) / doc.numPages);
         const page = await doc.getPage(p);
@@ -436,10 +443,10 @@ details summary { cursor: pointer; font-weight: 600; }
           // no text patch on this page, but there is a picture: read the picture
           try {
             const r = await ocrPage(page, p, (msg, frac) => notice('working', msg, 'Plans exported as a picture take a little longer to read.', ((p - 1) + frac) / doc.numPages));
-            pages.push(r.tokens); legendFromKey = legendFromKey.concat(r.legend);
+            pages.push(r.tokens); legendFromKey = legendFromKey.concat(r.legend); positions = positions.concat(r.positions);
             if (r.tokens.addrs.length) pictured++;
           } catch (e) { ocrFailed = e; pages.push(t); }
-        } else { pages.push(t); words.push(...t.words); }
+        } else { pages.push(t); words.push(...t.words); positions = positions.concat(K.positionLabelsFromWords(t.words, p)); }
       }
       // symbol keys that list channel counts ("x8 (37 channel/Mode 1)") name the fixtures directly
       const textLines = words.map(w => ({ text: w.str, x: w.ox, y: -w.oy, h: w.size }));
@@ -447,9 +454,10 @@ details summary { cursor: pointer; font-weight: 600; }
       const seenKey = new Set(); legendFromKey = legendFromKey.filter(f => { const k = f.name + '|' + f.footprint; if (seenKey.has(k)) return false; seenKey.add(k); return true; });
       keyFixtures = legendFromKey;
 
-      const res = K.buildRows(pages, library(), { legend: legendFromKey });
+      const res = K.buildRows(pages, library(), { legend: legendFromKey, positions });
+      positionNames = [...new Set(positions.map(l => l.name))];
       legend = K.extractLegend(words).concat(legendFromKey.map(f => ({ name: f.name + ' (' + f.mode + ')', count: f.qty })));
-      rows = res.rows.map(r => ({ id: nextId++, channel: r.channel, universe: r.universe, address: r.address, fixture: r.fixture, auto: !!r.fixture, guessFp: r.footprintGuess, ocr: !!r.ocr }));
+      rows = res.rows.map(r => ({ id: nextId++, channel: r.channel, universe: r.universe, address: r.address, fixture: r.fixture, auto: !!r.fixture, guessFp: r.footprintGuess, ocr: !!r.ocr, position: r.position || '' }));
       issues = res.issues;
       recompute();
       isExample = false;
@@ -466,7 +474,7 @@ details summary { cursor: pointer; font-weight: 600; }
       notice('error', 'Could not read that PDF', (e && e.message || String(e)) + '. Try exporting it again from Vectorworks.');
     } finally { reading = false; }
   }
-  let pictureRead = false, keyFixtures = [];
+  let pictureRead = false, keyFixtures = [], positionNames = [];
 
   function notice(kind, title, body, frac) {
     const n = $('notice'); n.hidden = false; n.className = 'notice ' + kind;
@@ -493,6 +501,10 @@ details summary { cursor: pointer; font-weight: 600; }
     if (auto) out.push({ type: 'auto', msg: keyFixtures.length
       ? `${auto} fixture name${auto > 1 ? 's were' : ' was'} matched to the drawing's symbol key by channel count. Confirm against the drawing.`
       : `${auto} fixture name${auto > 1 ? 's were' : ' was'} filled from channel count. Confirm against the drawing's legend.` });
+    if (positionNames.length) {
+      const noPos = rows.filter(r => !r.position).length;
+      if (noPos) out.push({ type: 'auto', msg: `${noPos} label${noPos > 1 ? 's have' : ' has'} no truss name. Add it in the Position column, or leave it blank.` });
+    }
     const last = rows.filter(r => r.universe != null && r.footprint == null && r.fixture && r.auto).length;
     if (last) out.push({ type: 'auto', msg: 'The last fixture in each universe has no spacing to measure, so its type is a guess.' });
     return out;
@@ -509,6 +521,8 @@ details summary { cursor: pointer; font-weight: 600; }
     const names = new Set(library().map(fxLabel)); legend.forEach(l => names.add(l.name));
     rows.forEach(r => r.fixture && names.add(r.fixture));
     [...names].sort().forEach(n => { const o = document.createElement('option'); o.value = n; dl.append(o); });
+    const pl = $('poslist'); pl.textContent = '';
+    [...new Set(positionNames.concat(rows.map(r => r.position).filter(Boolean)))].sort().forEach(n => { const o = document.createElement('option'); o.value = n; pl.append(o); });
   }
 
   function renderTable() {
@@ -527,6 +541,10 @@ details summary { cursor: pointer; font-weight: 600; }
         if (m) { r.universe = +m[1]; r.address = +m[2]; recompute(); render(); } else { toast('Write the address as universe.address, for example 2.177'); uIn.value = addrText(r); } });
       td2.append(uIn);
 
+      const tdP = document.createElement('td');
+      const pIn = document.createElement('input'); pIn.type = 'text'; pIn.id = 'po-' + r.id; pIn.value = r.position || ''; pIn.placeholder = 'LX 1'; pIn.style.width = '80px'; pIn.setAttribute('list', 'poslist'); pIn.setAttribute('aria-label', 'Truss or position for ' + (addrText(r) || 'label'));
+      pIn.addEventListener('change', () => { r.position = pIn.value.trim(); renderChecks(); renderSheets(); });
+      tdP.append(pIn);
       const td3 = document.createElement('td'); td3.className = 'mono'; td3.textContent = r.footprint ?? (r.guessFp ? '≈' + r.guessFp : '—');
 
       const td4 = document.createElement('td');
@@ -553,9 +571,9 @@ details summary { cursor: pointer; font-weight: 600; }
       const td6 = document.createElement('td'); const del = document.createElement('button'); del.type = 'button'; del.className = 'del'; del.textContent = '×'; del.setAttribute('aria-label', 'Remove label ' + (r.channel || ''));
       del.addEventListener('click', () => { rows = rows.filter(o => o !== r); recompute(); render(); });
       td6.append(del);
-      tr.append(td1, td2, td3, td4, td5, td6); tb.append(tr);
+      tr.append(td1, td2, tdP, td3, td4, td5, td6); tb.append(tr);
     });
-    if (!rows.length) { const tr = document.createElement('tr'); const td = document.createElement('td'); td.colSpan = 6; td.className = 'status'; td.textContent = 'No labels yet.'; tr.append(td); tb.append(tr); }
+    if (!rows.length) { const tr = document.createElement('tr'); const td = document.createElement('td'); td.colSpan = 7; td.className = 'status'; td.textContent = 'No labels yet.'; tr.append(td); tb.append(tr); }
   }
 
   function printOrder() { return rows.slice().sort((a, b) => (a.channel || 1e9) - (b.channel || 1e9) || (a.universe ?? 99) - (b.universe ?? 99) || (a.address ?? 0) - (b.address ?? 0)); }
@@ -573,7 +591,7 @@ details summary { cursor: pointer; font-weight: 600; }
         cell.style.gridColumn = (i % 2 === 0) ? '1' : '3'; cell.style.gridRow = String(Math.floor(i / 2) + 1);
         if (r) { const a = document.createElement('div'); a.className = 'n'; a.textContent = r.fixture || 'Fixture needed';
           const b = document.createElement('div'); b.className = 'c'; b.textContent = r.channel ?? '???';
-          const c = document.createElement('div'); c.className = 'a'; c.textContent = addrText(r) || '?.???'; cell.append(a, b, c); }
+          const c = document.createElement('div'); c.className = 'a'; c.textContent = K.addrLine({ universe: r.universe, address: r.address, position: showPos() ? r.position : '' }) || '?.???'; cell.append(a, b, c); }
         sh.append(cell);
       }
       const cap = document.createElement('figcaption'); cap.className = 'sheetcap'; cap.textContent = `Sheet ${s + 1} of ${n}`;
@@ -594,7 +612,8 @@ details summary { cursor: pointer; font-weight: 600; }
   // ---------- outputs: Word, PDF, print ----------
   // Inside claude.ai the page is sandboxed: no print dialog, and files go through the downloads capability.
   const inClaude = !!(window.claude && window.claude.use);
-  const labelList = () => printOrder().map(r => ({ fixture: r.fixture, channel: r.channel, universe: r.universe, address: r.address }));
+  const showPos = () => $('showPos').value === 'on';
+  const labelList = () => printOrder().map(r => ({ fixture: r.fixture, channel: r.channel, universe: r.universe, address: r.address, position: showPos() ? (r.position || '') : '' }));
   const jobName = () => ($('job').value.trim() || 'Lighting');
   const baseName = () => jobName().replace(/[\\/:*?"<>|]+/g, '-') + ' - Lighting Labels';
 
@@ -655,7 +674,7 @@ details summary { cursor: pointer; font-weight: 600; }
           const a = document.createElement('div'); a.className = 'pn'; a.textContent = L.fixture || '';
           a.style.fontSize = K.fitNamePt(L.fixture || '', measureMm) + 'pt'; a.style.minHeight = '1.15em';
           const b = document.createElement('div'); b.className = 'pc'; b.textContent = L.channel ?? '';
-          const d = document.createElement('div'); d.className = 'pa'; d.textContent = L.universe != null ? L.universe + '.' + L.address : '';
+          const d = document.createElement('div'); d.className = 'pa'; d.textContent = K.addrLine(L);
           c.append(a, b, d);
         }
         sh.append(c);
@@ -688,6 +707,7 @@ details summary { cursor: pointer; font-weight: 600; }
   ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove('over'); }));
   drop.addEventListener('drop', (e) => { const f = [...(e.dataTransfer.files || [])].find(f => /pdf$/i.test(f.type) || /\.pdf$/i.test(f.name)); if (f) readPdf(f); else toast('That is not a PDF.'); });
   $('border').addEventListener('change', renderSheets);
+  $('showPos').addEventListener('change', renderSheets);
   $('download').addEventListener('click', download);
   $('pdf').addEventListener('click', downloadPdf);
   $('print').addEventListener('click', printLabels);

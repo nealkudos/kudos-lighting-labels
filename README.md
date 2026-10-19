@@ -6,7 +6,7 @@ Each label has three centred lines:
 
 1. Fixture name with mode — `Robe LEDBeam 350 (Mode 1)` (14 pt)
 2. Channel number — `501` (28 pt bold)
-3. DMX address, dotted — `5.1` (14 pt)
+3. DMX address, dotted — `5.1` (14 pt), followed by the truss when the plan names it — `5.1 · LX 3`
 
 Labels print in channel order.
 
@@ -31,6 +31,10 @@ Always check flagged rows against the plan before printing.
 - `0/0` (unpatched) is ignored.
 - Fixture type is not written next to each fixture on the drawing, so it is worked out from the channel count (the gap to the next address in the same universe) using the fixture modes library. When two fixtures share a count (LEDBeam 150 and 350 are both 22) the name is left blank to choose. The last fixture in each universe has nothing to measure against, so its type is a guess and is flagged.
 - Fixture names from the drawing's Symbol Key are shown for reference and offered in the fixture picker.
+
+### Truss names
+
+When the plan writes truss names beside the trusses (`LX 1`, `LX2`, `Truss 3`, `FOH 1`, `Bar 2`, `Pipe 1`, `Boom 1`, `Tower 1`, `Ladder 1`), the tool lines up the fixtures that sit on each truss and gives the group the nearest name. It fills the **Position** column, which can be edited, and is printed after the address unless **Truss on labels** is set to Hide.
 
 ### Plans exported as a picture
 
