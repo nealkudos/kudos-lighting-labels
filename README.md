@@ -32,7 +32,18 @@ Always check flagged rows against the plan before printing.
 - Fixture type is not written next to each fixture on the drawing, so it is worked out from the channel count (the gap to the next address in the same universe) using the fixture modes library. When two fixtures share a count (LEDBeam 150 and 350 are both 22) the name is left blank to choose. The last fixture in each universe has nothing to measure against, so its type is a guess and is flagged.
 - Fixture names from the drawing's Symbol Key are shown for reference and offered in the fixture picker.
 
-The PDF must contain real text. If Vectorworks exported text as outlines, or the PDF is a scan, nothing will be found.
+### Plans exported as a picture
+
+Some Vectorworks exports come out as an image with no text in them (the GH Greatroom plan did). The tool spots this and reads the picture instead:
+
+1. A quick look at the whole page finds where the numbers are.
+2. Each callout is rendered at 600, 900 and 1200 dpi, read at 0°, 90° and 270°, and the reads vote. Coloured symbols and labels are blanked first so they don't run into the digits.
+3. Anything still unclear gets a tight re-read on its own.
+4. The Symbol Key is read with letters. Lines like `x8 (37 channel/Mode 1)` give each fixture's name, mode and channel count, and the counts are checked against the labels.
+
+Rows read this way are marked **From picture** and need confirming. A picture plan takes about 20 seconds on a laptop; a text PDF is instant. Re-exporting with text kept as text is still the most reliable route.
+
+Picture reading uses [tesseract.js](https://github.com/naptha/tesseract.js) 5.1.1 (Apache 2.0). Its engine and English data are in `ocr/` and must be served next to `index.html`.
 
 ## Word layout
 
@@ -46,8 +57,9 @@ Matches the Kudos Avery template: A4, 8 rows × 3 columns (column 2 is a 3 mm gu
 | `core.js` | PDF parsing, pairing, checks and the .docx builder. No DOM, so it can be reused or tested in Node. |
 | `src/index.src.html` | Page source; `/*@@CORE@@*/` is replaced by `core.js`. |
 | `build.mjs` | `node build.mjs` rebuilds `index.html`. |
+| `ocr/` | tesseract.js worker, engine (`.wasm.js`) and English data, used only for picture plans. |
 
-Libraries load from cdnjs: pdf.js 3.11.174, JSZip 3.10.1 and jsPDF 2.5.1. Nothing is uploaded anywhere; the PDF is read in the browser.
+Libraries load from cdnjs: pdf.js 3.11.174, JSZip 3.10.1 and jsPDF 2.5.1, plus tesseract.js 5.1.1 from jsDelivr when a picture plan is loaded. Nothing is uploaded anywhere; the PDF is read in the browser.
 
 ## Adding fixture modes
 
@@ -57,7 +69,7 @@ Edit `FIXTURE_LIBRARY` at the top of `core.js` (name, mode, channel count), then
 
 This goes into the Kudos CRM alongside the LED configurator. It is a static page with no server side, so any of these work:
 
-- Serve `index.html` as-is from the CRM (or embed it in an iframe on a CRM page).
+- Serve `index.html` and the `ocr/` folder as-is from the CRM (or embed the page in an iframe on a CRM page).
 - Lift the markup, styles and two scripts out of `index.html` into a CRM page. It needs these libraries from cdnjs: pdf.js 3.11.174 (`pdf.min.js` and `pdf.worker.min.js`), JSZip 3.10.1 and jsPDF 2.5.1.
 - Use `core.js` on its own with the CRM's own UI:
   - `extractTokens(items, page)` turns pdf.js text items into address and channel tokens.

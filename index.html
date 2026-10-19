@@ -29,6 +29,7 @@
   --ok: #1d8a5b; --warn: #a86a00; --bad: #c43a3a; color-scheme: light; }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body { background: var(--bg); color: var(--fg); }
 body { margin: 0; font: 15px/1.5 var(--body); }
 .wrap { max-width: 1100px; margin: 0 auto; padding-block: 20px 60px;
@@ -99,6 +100,15 @@ details summary { cursor: pointer; font-weight: 600; }
 .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(18px + env(safe-area-inset-bottom, 0px)); background: var(--fg); color: var(--bg); padding: 10px 16px; border-radius: 8px; font-weight: 500; max-width: calc(100% - 32px); z-index: 20; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.notice { border-radius: 8px; padding: 12px 14px; display: grid; gap: 6px; border: 1px solid var(--line); background: var(--panel-2); box-shadow: inset 4px 0 0 var(--accent); }
+.notice.ok { box-shadow: inset 4px 0 0 var(--ok); }
+.notice.warn { box-shadow: inset 4px 0 0 var(--warn); }
+.notice.error { box-shadow: inset 4px 0 0 var(--bad); background: color-mix(in srgb, var(--bad) 10%, var(--panel-2)); }
+.notice-title { font-weight: 600; }
+.notice-body { font-size: .92rem; color: var(--muted); }
+.bar { height: 6px; border-radius: 99px; background: var(--line); overflow: hidden; }
+.bar span { display: block; height: 100%; width: 3%; background: var(--accent); transition: width .3s; }
+.tag.pic { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
 .printhint { font-size: .85rem; color: var(--muted); }
 
 /* print layout: exact A4 sheets on the Avery 16-up grid (same geometry as the Word file) */
@@ -148,7 +158,11 @@ details summary { cursor: pointer; font-weight: 600; }
           <option value="none">None (pre-cut Avery sheets)</option>
         </select></label></div>
     </div>
-    <p class="status" id="status"></p>
+    <div class="notice" id="notice" role="status" aria-live="polite" hidden>
+      <div class="notice-title" id="noticeTitle"></div>
+      <div class="notice-body" id="noticeBody"></div>
+      <div class="bar" id="noticeBar" hidden><span></span></div>
+    </div>
   </section>
 
   <section class="panel" aria-labelledby="h-chk">
@@ -313,17 +327,106 @@ details summary { cursor: pointer; font-weight: 600; }
     return { pairs, loneAddrs };
   }
 
-  /* ---------- 3. Merge pages into one row per DMX address, with checks ---------- */
-  function buildRows(pagesTokens, library) {
+  /* ---------- 2b. Picture-only plans: OCR words -> tokens ----------
+     words: [{text, conf, x0, y0, x1, y1, refined}] in page points (y down), from any rotation.
+     Digits are ~0.72 of the em, so the bbox height is scaled to an em to keep pairing distances the same as text mode. */
+  function overlap(a, b) {
+    const w = Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0), h = Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0);
+    if (w <= 0 || h <= 0) return 0;
+    const area = (r) => (r.x1 - r.x0) * (r.y1 - r.y0);
+    return (w * h) / Math.min(area(a), area(b));
+  }
+  /* Several reads of the same spot (different rotations and sizes) vote: overlapping finds are grouped,
+     and the text with the highest total confidence wins. Valid patch tokens beat anything else. */
+  const VALID_TOKEN = /^(\d{1,2}\/\d{1,3}|\d{3,4})$/;
+  function dedupeWords(words) {
+    const groups = [];
+    words.slice().sort((p, q) => q.conf - p.conf).forEach(w => {
+      const g = groups.find(g => overlap(g.box, w) > 0.4);
+      if (g) g.items.push(w); else groups.push({ box: w, items: [w] });
+    });
+    return groups.map(g => {
+      const tally = new Map();
+      g.items.forEach(w => { const t = w.text.trim(); const v = VALID_TOKEN.test(t);
+        const e = tally.get(t) || { score: 0, best: w, valid: v }; e.score += w.conf; if (w.conf > e.best.conf) e.best = w; tally.set(t, e); });
+      const win = [...tally.values()].sort((p, q) => (q.valid - p.valid) || (q.score - p.score))[0];
+      return Object.assign({}, win.best, { votes: g.items.filter(w => w.text.trim() === win.best.text.trim()).length });
+    });
+  }
+  function tokensFromOcrWords(words, page, minConf) {
+    minConf = minConf == null ? 60 : minConf;
+    const addrs = [], chans = [];
+    for (const w of dedupeWords(words.filter(w => w.conf >= (w.refined ? 35 : minConf)))) {
+      if (w.conf < 50 && (w.votes || 1) < 2) continue;            // a weak read only counts if another read agrees
+      const t = w.text.trim();
+      const cx = (w.x0 + w.x1) / 2, cy = (w.y0 + w.y1) / 2;
+      const size = Math.min(w.x1 - w.x0, w.y1 - w.y0) / 0.72;
+      const m = t.match(ADDR_RE);
+      if (m) {
+        const u = +m[1], a = +m[2];
+        if (u && a && a <= 512) addrs.push({ universe: u, address: a, x: cx, y: cy, size, page, ocr: true, box: w });
+      } else if (CHAN_RE.test(t)) chans.push({ channel: +t, x: cx, y: cy, size, page, ocr: true, box: w });
+    }
+    return { addrs, chans, other: [], words: [], ocr: true };
+  }
+  /* Channels that found no address after the first pass: where to look again, closer up. */
+  function unpairedChannels(tokens) {
+    const { pairs } = pairTokens(tokens.addrs, tokens.chans);
+    const used = new Set(pairs.map(p => p.chan));
+    return tokens.chans.filter(c => !used.has(c));
+  }
+
+  /* ---------- 2c. Symbol key with channel counts ----------
+     lines: [{text, x, y}] top to bottom. Finds "x8 (37 channel/Mode 1)" style lines and the fixture name above. */
+  const COUNT_RE = /(?:x\s*(\d{1,3})\s*)?\(\s*(\d{1,3})\s*ch(?:annel)?s?\b[^)]*?(?:[\/,;-]\s*(mode\s*[\w.\- ]+?))?\s*\)?\s*$/i;
+  function cleanFixtureName(s) {
+    return s.replace(/@/g, ' ').replace(/\.gdtf\b/ig, '').replace(/\s+/g, ' ').trim();
+  }
+  function parseLegendLines(lines) {
+    const out = [];
+    const sorted = lines.filter(l => l.text && l.text.trim()).slice().sort((a, b) => a.y - b.y || a.x - b.x);
+    let lastCountIdx = -1;
+    sorted.forEach((l, i) => {
+      const m = l.text.trim().match(COUNT_RE);
+      if (!m) return;
+      const before = l.text.trim().slice(0, m.index).trim();       // name may be on the same line
+      const nameParts = [];
+      const lh = l.h || 12;
+      for (let j = i - 1; j >= 0 && nameParts.length < 2; j--) {
+        const p = sorted[j];
+        if (Math.abs(p.y - l.y) > lh * 4.5) break;                 // too far above
+        if (Math.abs(p.x - l.x) > lh * 8) continue;                 // another part of the drawing at the same height
+        if (/symbol\s*key|^key$/i.test(p.text.trim())) break;
+        if (COUNT_RE.test(p.text.trim())) break;                     // the entry above
+        nameParts.unshift(p.text.trim());
+      }
+      if (before) nameParts.push(before);
+      lastCountIdx = i;
+      const name = cleanFixtureName(nameParts.join(' '));
+      if (!name || !/[a-z]{3}/i.test(name)) return;
+      const fp = +m[2];
+      const mode = m[3] ? m[3].trim().replace(/^mode\s*/i, 'Mode ') : fp + ' Ch';
+      out.push({ name, mode, footprint: fp, qty: m[1] ? +m[1] : null, fromDrawing: true });
+    });
+    return out;
+  }
+
+  /* ---------- 3. Merge pages into one row per DMX address, with checks ----------
+     opts.legend: fixtures read from the drawing's key (name, mode, footprint, qty) — preferred over the library. */
+  function buildRows(pagesTokens, library, opts) {
     library = library || FIXTURE_LIBRARY;
+    opts = opts || {};
+    const legend = opts.legend || [];
     const byKey = new Map();
     const conflicts = [];
+    const loneChans = [];
     for (const pt of pagesTokens) {
       const { pairs, loneAddrs } = pairTokens(pt.addrs, pt.chans);
+      const pairedChans = new Set(pairs.map(p => p.chan));
       for (const p of pairs) {
         const key = p.addr.universe + '/' + p.addr.address;
         const prev = byKey.get(key);
-        if (!prev) byKey.set(key, { universe: p.addr.universe, address: p.addr.address, channel: p.chan.channel, pages: [p.addr.page] });
+        if (!prev) byKey.set(key, { universe: p.addr.universe, address: p.addr.address, channel: p.chan.channel, pages: [p.addr.page], ocr: !!pt.ocr });
         else {
           if (!prev.pages.includes(p.addr.page)) prev.pages.push(p.addr.page);
           if (prev.channel == null) prev.channel = p.chan.channel;
@@ -332,39 +435,60 @@ details summary { cursor: pointer; font-weight: 600; }
       }
       for (const a of loneAddrs) {
         const key = a.universe + '/' + a.address;
-        if (!byKey.has(key)) byKey.set(key, { universe: a.universe, address: a.address, channel: null, pages: [a.page] });
+        if (!byKey.has(key)) byKey.set(key, { universe: a.universe, address: a.address, channel: null, pages: [a.page], ocr: !!pt.ocr });
       }
+      pt.chans.forEach(c => { if (!pairedChans.has(c)) loneChans.push({ channel: c.channel, page: c.page, ocr: !!pt.ocr }); });
     }
     const rows = [...byKey.values()].sort((p, q) => p.universe - q.universe || p.address - q.address);
+
+    // A channel number with no readable address beside it still gets a row when it belongs to a run
+    // already on the plan (e.g. 101 when 102–106 were found). Dimensions like 3775 are ignored.
+    const known = new Set(rows.map(r => r.channel).filter(c => c != null));
+    const orphanRows = [];
+    for (const c of loneChans) {
+      if (known.has(c.channel)) continue;
+      const block = Math.floor(c.channel / 100);
+      const run = [...known].filter(k => Math.floor(k / 100) === block);
+      if (run.length >= 2 && c.channel >= Math.min(...run) - 2 && c.channel <= Math.max(...run) + 2) {
+        known.add(c.channel);
+        orphanRows.push({ universe: null, address: null, channel: c.channel, pages: [c.page], ocr: c.ocr, fixture: '', suggestions: [] });
+      }
+    }
 
     // footprint = gap to next address in same universe
     rows.forEach((r, i) => {
       const n = rows[i + 1];
       r.footprint = (n && n.universe === r.universe) ? n.address - r.address : null;
     });
-    // last fixture in a universe: assume same footprint as the one before if it was the same gap pattern
+    // last fixture in a universe: assume same footprint as the one before
     rows.forEach((r, i) => {
       if (r.footprint == null) {
         const p = rows[i - 1];
         r.footprintGuess = (p && p.universe === r.universe) ? p.footprint : null;
       }
     });
-    // suggest fixture from footprint (only if exactly one library match)
+    // name from footprint: the drawing's own key first, then the library (only when exactly one matches)
     rows.forEach(r => {
       const fp = r.footprint != null ? r.footprint : r.footprintGuess;
-      const hits = library.filter(f => f.footprint === fp);
+      const fromKey = legend.filter(f => f.footprint === fp);
+      const hits = fromKey.length ? fromKey : library.filter(f => f.footprint === fp);
       r.suggestions = hits;
       r.fixture = hits.length === 1 ? hits[0].name + ' (' + hits[0].mode + ')' : '';
+      r.fromKey = fromKey.length === 1;
     });
 
-    // checks
+    const all = rows.concat(orphanRows);
+    return { rows: all, issues: checkRows(all, conflicts, legend) };
+  }
+
+  function checkRows(rows, conflicts, legend) {
     const issues = [];
-    conflicts.forEach(c => issues.push({ type: 'conflict', msg: `${c.key} has channel ${c.channels[0]} on one page and ${c.channels[1]} on page ${c.page}` }));
-    rows.filter(r => r.channel == null).forEach(r => issues.push({ type: 'missing', msg: `${r.universe}.${r.address} has no channel number next to it` }));
+    (conflicts || []).forEach(c => issues.push({ type: 'conflict', msg: `${c.key} has channel ${c.channels[0]} on one page and ${c.channels[1]} on page ${c.page}` }));
+    rows.filter(r => r.universe == null).forEach(r => issues.push({ type: 'missing', msg: `Channel ${r.channel} has no readable address next to it. Add it in the table.` }));
+    rows.filter(r => r.universe != null && r.channel == null).forEach(r => issues.push({ type: 'missing', msg: `${r.universe}.${r.address} has no channel number next to it` }));
     const seen = new Map();
-    rows.forEach(r => { if (r.channel != null) { const k = r.channel; seen.set(k, (seen.get(k) || []).concat(r.universe + '.' + r.address)); } });
+    rows.forEach(r => { if (r.channel != null) { const k = r.channel; seen.set(k, (seen.get(k) || []).concat(r.universe != null ? r.universe + '.' + r.address : 'no address')); } });
     for (const [ch, list] of seen) if (list.length > 1) issues.push({ type: 'duplicate', msg: `Channel ${ch} is on ${list.join(' and ')}` });
-    // gaps inside a run of channels (e.g. 501,502,504)
     const chs = [...seen.keys()].sort((a, b) => a - b);
     for (let i = 1; i < chs.length; i++) {
       const g = chs[i] - chs[i - 1];
@@ -373,11 +497,18 @@ details summary { cursor: pointer; font-weight: 600; }
         issues.push({ type: 'gap', msg: `Channel ${missing.join(', ')} not found between ${chs[i - 1]} and ${chs[i]}` });
       }
     }
-    return { rows, issues };
+    // the key's quantities against what was found
+    (legend || []).forEach(f => {
+      if (f.qty == null) return;
+      const label = f.name + ' (' + f.mode + ')';
+      const n = rows.filter(r => r.fixture === label).length;
+      if (n !== f.qty) issues.push({ type: 'count', msg: `The key says ${f.qty} × ${f.name}, but ${n} label${n === 1 ? ' is' : 's are'} set to it.` });
+    });
+    return issues;
   }
 
   function sortForLabels(rows) {
-    return rows.slice().sort((a, b) => (a.channel ?? 1e9) - (b.channel ?? 1e9) || a.universe - b.universe || a.address - b.address);
+    return rows.slice().sort((a, b) => (a.channel ?? 1e9) - (b.channel ?? 1e9) || (a.universe ?? 99) - (b.universe ?? 99) || (a.address ?? 0) - (b.address ?? 0));
   }
 
   /* ---------- 4. Word document on the Avery 16-per-sheet layout ----------
@@ -399,7 +530,7 @@ details summary { cursor: pointer; font-weight: 600; }
     const b = border === 'none' ? '' :
       `<w:tcBorders>${['top', 'left', 'bottom', 'right'].map(s => `<w:${s} w:val="single" w:sz="4" w:space="0" w:color="${border === 'black' ? '000000' : 'C8C8C8'}"/>`).join('')}</w:tcBorders>`;
     const body = lbl
-      ? para(lbl.fixture || '', 28, false) + para(lbl.channel != null ? String(lbl.channel) : '', 56, true) + para(lbl.universe + '.' + lbl.address, 28, false)
+      ? para(lbl.fixture || '', 28, false) + para(lbl.channel != null ? String(lbl.channel) : '', 56, true) + para(lbl.universe != null ? lbl.universe + '.' + lbl.address : '', 28, false)
       : para('', 28, false);
     return `<w:tc><w:tcPr><w:tcW w:w="${TW.cellW}" w:type="dxa"/>${b}<w:vAlign w:val="center"/></w:tcPr>${body}</w:tc>`;
   }
@@ -510,7 +641,7 @@ details summary { cursor: pointer; font-weight: 600; }
         doc.setFont('helvetica', 'bold'); doc.setFontSize(GEO.pt.chan);
         if (L.channel != null) doc.text(String(L.channel), cx, y0 + hName + hChan * 0.8, { align: 'center' });
         doc.setFont('helvetica', 'normal'); doc.setFontSize(GEO.pt.addr);
-        doc.text(L.universe + '.' + L.address, cx, y0 + hName + hChan + hAddr * 0.78, { align: 'center' });
+        if (L.universe != null) doc.text(L.universe + '.' + L.address, cx, y0 + hName + hChan + hAddr * 0.78, { align: 'center' });
       }
     }
     return doc;
@@ -529,7 +660,7 @@ details summary { cursor: pointer; font-weight: 600; }
     return [...out].map(([name, count]) => ({ name, count }));
   }
 
-  const api = { FIXTURE_LIBRARY, extractTokens, extractLegend, pairTokens, buildRows, sortForLabels, buildDocx, buildPdf, fitNamePt, cellOrigin, GEO, mergeRuns, _TW: TW };
+  const api = { FIXTURE_LIBRARY, extractTokens, extractLegend, tokensFromOcrWords, unpairedChannels, parseLegendLines, cleanFixtureName, checkRows, dedupeWords, pairTokens, buildRows, sortForLabels, buildDocx, buildPdf, fitNamePt, cellOrigin, GEO, mergeRuns, _TW: TW };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.KudosLabels = api;
 })(this);
 
@@ -571,40 +702,229 @@ details summary { cursor: pointer; font-weight: 600; }
   }
 
   function recompute() {
-    rows.sort((p, q) => p.universe - q.universe || p.address - q.address);
-    rows.forEach((r, i) => { const n = rows[i + 1]; r.footprint = (n && n.universe === r.universe) ? n.address - r.address : null; });
+    const hasAddr = rows.filter(r => r.universe != null), noAddr = rows.filter(r => r.universe == null);
+    hasAddr.sort((p, q) => p.universe - q.universe || p.address - q.address);
+    hasAddr.forEach((r, i) => { const n = hasAddr[i + 1]; r.footprint = (n && n.universe === r.universe) ? n.address - r.address : null; });
+    noAddr.forEach(r => { r.footprint = null; });
+    rows = hasAddr.concat(noAddr);
+  }
+
+  // ---------- picture reading (for PDFs exported as an image) ----------
+  // tesseract.js runs in the browser; its engine and English data ship in the ocr/ folder next to this page.
+  const OCR_BASE = new URL('ocr/', location.href).href;
+  const TESS_SRC = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
+  let ocrWorker = null, ocrProgress = null;
+  function loadScript(src) {
+    return new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = () => rej(new Error('Could not load ' + src)); document.head.append(s); });
+  }
+  async function getOcr() {
+    if (!window.Tesseract) await loadScript(TESS_SRC);
+    if (!ocrWorker) ocrWorker = await Tesseract.createWorker('eng', 1, {
+      workerPath: OCR_BASE + 'worker.min.js', corePath: OCR_BASE, langPath: OCR_BASE,
+      workerBlobURL: false, gzip: true, cacheMethod: 'none',
+      logger: (m) => { if (ocrProgress && m.status === 'recognizing text') ocrProgress(m.progress); }
+    });
+    return ocrWorker;
+  }
+  // Render the whole page (or one region of it, in PDF points) to a canvas at a given scale.
+  async function renderRegion(page, box, scale) {
+    const vp = page.getViewport({ scale });
+    const x0 = box ? box.x0 : 0, y0 = box ? box.y0 : 0;
+    const w = Math.max(1, Math.ceil((box ? box.x1 - box.x0 : vp.width / scale) * scale));
+    const h = Math.max(1, Math.ceil((box ? box.y1 - box.y0 : vp.height / scale) * scale));
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    const ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h);
+    await page.render({ canvasContext: ctx, viewport: vp, transform: [1, 0, 0, 1, -x0 * scale, -y0 * scale], background: '#fff' }).promise;
+    return c;
+  }
+  function rotateCanvas(src, rot) {     // clockwise
+    if (!rot) return src;
+    const c = document.createElement('canvas'); c.width = src.height; c.height = src.width;
+    const ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+    if (rot === 90) { ctx.translate(c.width, 0); ctx.rotate(Math.PI / 2); } else { ctx.translate(0, c.height); ctx.rotate(-Math.PI / 2); }
+    ctx.drawImage(src, 0, 0); return c;
+  }
+  // Blank out coloured ink: drops the coloured fixture symbols and blue labels
+  // that otherwise run into the numbers. Callout text on Vectorworks plans is black.
+  function inkOnly(c) {
+    const ctx = c.getContext('2d'), im = ctx.getImageData(0, 0, c.width, c.height), d = im.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const mx = Math.max(d[i], d[i + 1], d[i + 2]), mn = Math.min(d[i], d[i + 1], d[i + 2]);
+      if (mx - mn > 50) { d[i] = d[i + 1] = d[i + 2] = 255; }        // coloured -> paper
+      else { const g = (d[i] + d[i + 1] + d[i + 2]) / 3; d[i] = d[i + 1] = d[i + 2] = g; }
+      d[i + 3] = 255;
+    }
+    ctx.putImageData(im, 0, 0); return c;
+  }
+  function padCanvas(src, pad) {
+    const c = document.createElement('canvas'); c.width = src.width + 2 * pad; c.height = src.height + 2 * pad;
+    const ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height); ctx.drawImage(src, pad, pad); return c;
+  }
+  // point in the rotated image -> point in the upright image (W x H)
+  function unrotate(rot, x, y, W, H) { return rot === 90 ? [y, H - x] : rot === 270 ? [W - y, x] : [x, y]; }
+  function toBox(rot, b, W, H) {
+    const p = [unrotate(rot, b.x0, b.y0, W, H), unrotate(rot, b.x1, b.y1, W, H)];
+    return { x0: Math.min(p[0][0], p[1][0]), y0: Math.min(p[0][1], p[1][1]), x1: Math.max(p[0][0], p[1][0]), y1: Math.max(p[0][1], p[1][1]) };
+  }
+  const VALID = /^(\d{1,2}\/\d{1,3}|\d{3,4})$/;
+
+  /* 1) find where the numbers are with a quick look at 0° and 90°;
+     2) group nearby finds into callouts;
+     3) read each callout up close at 0°, 90° and 270° and keep the orientation that reads best. */
+  async function ocrPage(page, pageNo, say) {
+    const w = await getOcr();
+    const v1 = page.getViewport({ scale: 1 });
+    const findScale = Math.min(200 / 72, Math.sqrt(9e6 / (v1.width * v1.height)));
+    const full = await renderRegion(page, null, findScale);
+    await w.setParameters({ tessedit_pageseg_mode: '11', tessedit_char_whitelist: '0123456789/.' });
+    const finds = [];
+    for (const [i, rot] of [0, 90].entries()) {
+      ocrProgress = (p) => say(`Finding the numbers on page ${pageNo}`, 0.3 * (i + p) / 2);
+      const img = rotateCanvas(full, rot);
+      const { data } = await w.recognize(img);
+      data.words.forEach(x => { if (/\d/.test(x.text) && x.confidence >= 15) { const b = toBox(rot, x.bbox, full.width, full.height);
+        finds.push({ x0: b.x0 / findScale, y0: b.y0 / findScale, x1: b.x1 / findScale, y1: b.y1 / findScale }); } });
+    }
+    ocrProgress = null;
+    // group finds that sit within about one text height of each other
+    const groups = [];
+    finds.forEach(f => {
+      const h = Math.min(f.x1 - f.x0, f.y1 - f.y0) || 4;
+      const g = { x0: f.x0 - h, y0: f.y0 - h, x1: f.x1 + h, y1: f.y1 + h };
+      for (let k = 0; k < groups.length; k++) { const o = groups[k];
+        if (g.x0 < o.x1 && g.x1 > o.x0 && g.y0 < o.y1 && g.y1 > o.y0) { g.x0 = Math.min(g.x0, o.x0); g.y0 = Math.min(g.y0, o.y0); g.x1 = Math.max(g.x1, o.x1); g.y1 = Math.max(g.y1, o.y1); groups.splice(k, 1); k = -1; } }
+      groups.push(g);
+    });
+    const regions = groups.filter(g => (g.x1 - g.x0) * (g.y1 - g.y0) < 0.08 * v1.width * v1.height);
+    const words = [], unclear = [];
+    const pad = 60;
+    const readAt = async (r, dpi, rot) => {
+      const S = dpi / 72;
+      const crop = inkOnly(await renderRegion(page, r, S));
+      const img = padCanvas(rotateCanvas(crop, rot), pad);
+      const { data } = await w.recognize(img);
+      const toPage = (pb) => { const bb = toBox(rot, { x0: pb.x0 - pad, y0: pb.y0 - pad, x1: pb.x1 - pad, y1: pb.y1 - pad }, crop.width, crop.height);
+        return { x0: r.x0 + bb.x0 / S, y0: r.y0 + bb.y0 / S, x1: r.x0 + bb.x1 / S, y1: r.y0 + bb.y1 / S }; };
+      const ws = data.words.map(x => ({ text: x.text.trim(), conf: x.confidence, pb: x.bbox }));
+      return { ws, img, toPage, score: ws.filter(x => VALID.test(x.text)).reduce((a, x) => a + x.conf, 0) };
+    };
+    for (let i = 0; i < regions.length; i++) {
+      say(`Reading callout ${i + 1} of ${regions.length} on page ${pageNo}`, 0.3 + 0.45 * i / regions.length);
+      const r = regions[i];
+      // which way up is this callout? read at 0°, 90° and 270° and keep the best
+      let best = null, bestRot = 0;
+      for (const rot of [0, 90, 270]) { const res = await readAt(r, 900, rot); if (!best || res.score > best.score) { best = res; bestRot = rot; } }
+      if (best.score === 0) continue;
+      // read it twice more at other sizes; the reads vote later
+      const reads = [best, await readAt(r, 600, bestRot), await readAt(r, 1200, bestRot)];
+      if (window.__kudosDebug) reads.forEach((rd, k) => window.__kudosDebug.push({ r, rot: bestRot + '@' + [900, 600, 1200][k], score: rd.score, text: rd.ws.map(x => x.text + '(' + Math.round(x.conf) + ')').join(' ') }));
+      reads.forEach((rd, k) => rd.ws.forEach(x => {
+        words.push({ text: x.text, conf: x.conf, refined: true, ...rd.toPage(x.pb) });
+        // anything that reads poorly gets a tight look on its own line, clear of truss and symbols
+        if (k === 0 && (x.text.match(/\d/g) || []).length >= 2 && (x.conf < 85 || !VALID.test(x.text))) unclear.push({ img: rd.img, pb: x.pb, toPage: rd.toPage });
+      }));
+    }
+    if (unclear.length) {
+      await w.setParameters({ tessedit_pageseg_mode: '7', tessedit_char_whitelist: '0123456789/' });
+      for (let i = 0; i < unclear.length; i++) {
+        say(`Double-checking ${unclear.length} unclear number${unclear.length > 1 ? 's' : ''} on page ${pageNo}`, 0.75 + 0.1 * i / unclear.length);
+        const u = unclear[i], b = u.pb, h = b.y1 - b.y0;
+        const x0 = Math.max(0, b.x0 - 0.9 * h), x1 = Math.min(u.img.width, b.x1 + 0.9 * h);
+        const y0 = Math.max(0, b.y0 - 0.3 * h), y1 = Math.min(u.img.height, b.y1 + 0.3 * h);
+        const c = document.createElement('canvas'); const p2 = 40;
+        c.width = Math.ceil(x1 - x0) + 2 * p2; c.height = Math.ceil(y1 - y0) + 2 * p2;
+        const cx = c.getContext('2d'); cx.fillStyle = '#fff'; cx.fillRect(0, 0, c.width, c.height);
+        cx.drawImage(u.img, x0, y0, x1 - x0, y1 - y0, p2, p2, x1 - x0, y1 - y0);
+        const { data } = await w.recognize(c);
+        const t = data.text.replace(/\s+/g, '');
+        if (VALID.test(t)) words.push({ text: t, conf: data.confidence, refined: true, ...u.toPage({ x0, y0, x1, y1 }) });
+        if (window.__kudosDebug) window.__kudosDebug.push({ r: u.toPage({ x0, y0, x1, y1 }), rot: 'tight', score: data.confidence, text: t });
+      }
+      await w.setParameters({ tessedit_pageseg_mode: '11', tessedit_char_whitelist: '0123456789/.' });
+    }
+    const tokens = K.tokensFromOcrWords(words, pageNo);
+    // the symbol key, read with letters this time
+    say(`Reading the symbol key on page ${pageNo}`, 0.88);
+    await w.setParameters({ tessedit_pageseg_mode: '11', tessedit_char_whitelist: '' });
+    const keyScale = Math.min(300 / 72, Math.sqrt(14e6 / (v1.width * v1.height)));
+    const { data } = await w.recognize(await renderRegion(page, null, keyScale));
+    // build each key line from its words, split where there is a wide gap (an icon beside the name), keep the wordiest part
+    const lines = data.lines.map(l => {
+      const ws = (l.words || []).filter(x => x.confidence >= 30 && x.text.trim()).sort((a, b) => a.bbox.x0 - b.bbox.x0);
+      const h = l.bbox.y1 - l.bbox.y0, segs = [];
+      ws.forEach(x => { const last = segs[segs.length - 1];
+        if (last && x.bbox.x0 - last.x1 < 1.2 * h) { last.words.push(x.text.trim()); last.x1 = x.bbox.x1; }
+        else segs.push({ words: [x.text.trim()], x0: x.bbox.x0, x1: x.bbox.x1 }); });
+      const best = segs.sort((a, b) => (b.words.join('').replace(/[^a-z]/gi, '').length) - (a.words.join('').replace(/[^a-z]/gi, '').length))[0];
+      return best ? { text: best.words.join(' '), x: best.x0 / keyScale, y: l.bbox.y0 / keyScale, h: h / keyScale } : null;
+    }).filter(Boolean);
+    if (window.__kudosDebug) window.__kudosDebug.push(...data.lines.filter(l => /[a-z]{3}/i.test(l.text)).map(l => ({ r: l.bbox, rot: 'keyline', score: l.confidence, text: (l.words || []).map(x => x.text + '(' + Math.round(x.confidence) + ')@' + x.bbox.x0).join(' ') })), ...lines.map(l => ({ r: l, rot: 'kept', score: 0, text: l.text })));
+    return { tokens, legend: K.parseLegendLines(lines) };
+  }
+  async function pageHasImages(page) {
+    try { const ops = await page.getOperatorList(); const O = pdfjsLib.OPS;
+      return ops.fnArray.some(f => f === O.paintImageXObject || f === O.paintJpegXObject || f === O.paintInlineImageXObject || f === O.paintImageXObjectRepeat);
+    } catch (e) { return true; }
   }
 
   // ---------- PDF reading ----------
+  let reading = false;
   async function readPdf(file) {
-    if (!window.pdfjsLib) { setStatus('The PDF reader did not load. Check the connection and reload the page.'); return; }
-    setStatus('Reading ' + file.name + '…');
+    if (reading) { toast('Still reading the last PDF.'); return; }
+    if (!window.pdfjsLib) { notice('error', 'The PDF reader did not load', 'Check the internet connection and reload the page.'); return; }
+    reading = true;
+    notice('working', 'Reading ' + file.name, '', 0);
     try {
       const buf = await file.arrayBuffer();
       const doc = await pdfjsLib.getDocument({ data: new Uint8Array(buf) }).promise;
-      const pages = []; const words = [];
+      const pages = []; const words = []; let legendFromKey = []; let pictured = 0; let ocrFailed = null;
       for (let p = 1; p <= doc.numPages; p++) {
-        const tc = await (await doc.getPage(p)).getTextContent();
+        notice('working', `Reading page ${p} of ${doc.numPages}`, '', (p - 1) / doc.numPages);
+        const page = await doc.getPage(p);
+        const tc = await page.getTextContent();
         const t = K.extractTokens(tc.items, p);
-        pages.push(t); words.push(...t.words);
+        if (!t.addrs.length && await pageHasImages(page)) {
+          // no text patch on this page, but there is a picture: read the picture
+          try {
+            const r = await ocrPage(page, p, (msg, frac) => notice('working', msg, 'Plans exported as a picture take a little longer to read.', ((p - 1) + frac) / doc.numPages));
+            pages.push(r.tokens); legendFromKey = legendFromKey.concat(r.legend);
+            if (r.tokens.addrs.length) pictured++;
+          } catch (e) { ocrFailed = e; pages.push(t); }
+        } else { pages.push(t); words.push(...t.words); }
       }
-      const res = K.buildRows(pages, library());
-      legend = K.extractLegend(words);
-      rows = res.rows.map(r => ({ id: nextId++, channel: r.channel, universe: r.universe, address: r.address, fixture: r.fixture, auto: !!r.fixture, guessFp: r.footprintGuess }));
+      // symbol keys that list channel counts ("x8 (37 channel/Mode 1)") name the fixtures directly
+      const textLines = words.map(w => ({ text: w.str, x: w.ox, y: -w.oy, h: w.size }));
+      legendFromKey = legendFromKey.concat(K.parseLegendLines(textLines));
+      const seenKey = new Set(); legendFromKey = legendFromKey.filter(f => { const k = f.name + '|' + f.footprint; if (seenKey.has(k)) return false; seenKey.add(k); return true; });
+      keyFixtures = legendFromKey;
+
+      const res = K.buildRows(pages, library(), { legend: legendFromKey });
+      legend = K.extractLegend(words).concat(legendFromKey.map(f => ({ name: f.name + ' (' + f.mode + ')', count: f.qty })));
+      rows = res.rows.map(r => ({ id: nextId++, channel: r.channel, universe: r.universe, address: r.address, fixture: r.fixture, auto: !!r.fixture, guessFp: r.footprintGuess, ocr: !!r.ocr }));
       issues = res.issues;
       recompute();
       isExample = false;
-      const jobGuess = file.name.replace(/\.pdf$/i, '').replace(/\s*-?\s*(lighting\s*)?(pack|patch|plan)s?\s*(v\d+)?\s*$/i, '').trim();
-      if (!$('job').value) $('job').value = jobGuess;
-      setStatus(rows.length
-        ? `Read ${doc.numPages} page${doc.numPages > 1 ? 's' : ''} and found ${rows.length} patched fixture${rows.length > 1 ? 's' : ''}.`
-        : 'No DMX addresses (like 2/177) were found. If the PDF is a scan or the text was turned into outlines, export it again from Vectorworks with text kept as text.');
+      pictureRead = pictured > 0;
+      const jobGuess = file.name.replace(/\.pdf$/i, '').replace(/_/g, ' ').replace(/\s*-?\s*((lighting|lx)\s*)?(pack|patch|plan)s?\s*(v\d+)?\s*$/i, '').trim();
+      $('job').value = jobGuess;
+      const n = rows.length, pg = `${doc.numPages} page${doc.numPages > 1 ? 's' : ''}`;
+      if (n && pictureRead) notice('warn', `Found ${n} fixture${n > 1 ? 's' : ''} by reading the plan as a picture`, 'This PDF has no text in it, so the numbers were read from the image. Check every label against the drawing before printing.');
+      else if (n) notice('ok', `Found ${n} patched fixture${n > 1 ? 's' : ''} on ${pg}`, '');
+      else if (ocrFailed) notice('error', 'This plan is a picture and it could not be read here', 'The PDF has no text in it. Picture reading did not start in this browser (' + (ocrFailed.message || ocrFailed) + '). Re-export the PDF from Vectorworks with text kept as text, or open the tool from its hosted link.');
+      else notice('error', 'No DMX addresses found', `Read ${pg} but found no addresses written like 2/177. Check this is the patch drawing, or re-export the PDF from Vectorworks with text kept as text.`);
       render();
     } catch (e) {
-      setStatus('Could not read that PDF (' + (e && e.message || e) + '). Try exporting it again from Vectorworks.');
-    }
+      notice('error', 'Could not read that PDF', (e && e.message || String(e)) + '. Try exporting it again from Vectorworks.');
+    } finally { reading = false; }
   }
-  function setStatus(s) { $('status').textContent = s; }
+  let pictureRead = false, keyFixtures = [];
+
+  function notice(kind, title, body, frac) {
+    const n = $('notice'); n.hidden = false; n.className = 'notice ' + kind;
+    $('noticeTitle').textContent = title; $('noticeBody').textContent = body || ''; $('noticeBody').hidden = !body;
+    const bar = $('noticeBar'); bar.hidden = kind !== 'working';
+    if (kind === 'working') bar.firstElementChild.style.width = Math.round(Math.max(0.03, Math.min(1, frac || 0)) * 100) + '%';
+  }
 
   // ---------- rendering ----------
   function render() {
@@ -612,24 +932,20 @@ details summary { cursor: pointer; font-weight: 600; }
     renderChecks(); renderTable(); renderSheets(); renderLib();
   }
 
+  const addrText = (r) => r.universe != null ? r.universe + '.' + r.address : '';
   function liveIssues() {
-    const out = issues.filter(i => i.type === 'conflict').slice();
-    const missingCh = rows.filter(r => r.channel == null || r.channel === '');
-    missingCh.forEach(r => out.push({ type: 'missing', msg: `${r.universe}.${r.address} has no channel number. Add it in the table.` }));
-    const by = new Map();
-    rows.forEach(r => { if (r.channel) by.set(r.channel, (by.get(r.channel) || []).concat(r.universe + '.' + r.address)); });
-    for (const [ch, l] of by) if (l.length > 1) out.push({ type: 'duplicate', msg: `Channel ${ch} appears ${l.length} times (${l.join(', ')}).` });
-    const chs = [...by.keys()].sort((a, b) => a - b);
-    for (let i = 1; i < chs.length; i++) { const g = chs[i] - chs[i - 1];
-      if (g > 1 && g < 5 && Math.floor(chs[i] / 100) === Math.floor(chs[i - 1] / 100)) {
-        const m = []; for (let c = chs[i - 1] + 1; c < chs[i]; c++) m.push(c);
-        out.push({ type: 'gap', msg: `Channel ${m.join(', ')} missing between ${chs[i - 1]} and ${chs[i]}. Check the plan for an unlabelled fixture.` }); } }
+    const out = [];
+    if (pictureRead) out.push({ type: 'auto', msg: 'This plan was read as a picture. Check every channel and address against the drawing.' });
+    issues.filter(i => i.type === 'conflict').forEach(i => out.push(i));
+    out.push(...K.checkRows(rows, [], keyFixtures));
     const noFx = rows.filter(r => !r.fixture).length;
     if (noFx) out.push({ type: 'fixture', msg: `${noFx} label${noFx > 1 ? 's' : ''} still need a fixture name.` });
     const auto = rows.filter(r => r.fixture && r.auto).length;
-    if (auto) out.push({ type: 'auto', msg: `${auto} fixture name${auto > 1 ? 's were' : ' was'} filled from channel count. Confirm against the drawing's legend.` });
-    const last = rows.filter(r => r.footprint == null && r.fixture && r.auto).length;
-    if (last) out.push({ type: 'auto', msg: `The last fixture in each universe has no spacing to measure, so its type is a guess.` });
+    if (auto) out.push({ type: 'auto', msg: keyFixtures.length
+      ? `${auto} fixture name${auto > 1 ? 's were' : ' was'} matched to the drawing's symbol key by channel count. Confirm against the drawing.`
+      : `${auto} fixture name${auto > 1 ? 's were' : ' was'} filled from channel count. Confirm against the drawing's legend.` });
+    const last = rows.filter(r => r.universe != null && r.footprint == null && r.fixture && r.auto).length;
+    if (last) out.push({ type: 'auto', msg: 'The last fixture in each universe has no spacing to measure, so its type is a guess.' });
     return out;
   }
 
@@ -637,7 +953,7 @@ details summary { cursor: pointer; font-weight: 600; }
     const list = liveIssues(); const ul = $('checks'); ul.textContent = '';
     if (!list.length) { const li = document.createElement('li'); li.innerHTML = '<span class="dot ok"></span>'; li.append(rows.length ? `All ${rows.length} labels have a channel, address and fixture. No duplicates or gaps.` : 'Load a patch PDF to start.'); ul.append(li); }
     list.forEach(i => { const li = document.createElement('li'); const d = document.createElement('span');
-      d.className = 'dot ' + (['auto', 'gap'].includes(i.type) ? 'warn' : 'bad'); li.append(d, i.msg); ul.append(li); });
+      d.className = 'dot ' + (['auto', 'gap', 'count'].includes(i.type) ? 'warn' : 'bad'); li.append(d, i.msg); ul.append(li); });
     $('legendBox').hidden = !legend.length; const lg = $('legend'); lg.textContent = '';
     legend.forEach(l => { const c = document.createElement('span'); c.className = 'chip'; c.textContent = l.name + (l.count != null ? ' × ' + l.count : ''); lg.append(c); });
     const dl = $('fxlist'); dl.textContent = '';
@@ -650,21 +966,22 @@ details summary { cursor: pointer; font-weight: 600; }
     const tb = $('tbody'); tb.textContent = '';
     rows.forEach(r => {
       const tr = document.createElement('tr');
-      if (!r.fixture || !r.channel) tr.className = 'need'; else if (r.auto) tr.className = 'check';
-      const ch = document.createElement('input'); ch.type = 'number'; ch.id = 'ch-' + r.id; ch.value = r.channel ?? ''; ch.setAttribute('aria-label', 'Channel for ' + r.universe + '.' + r.address);
-      ch.addEventListener('change', () => { r.channel = ch.value ? +ch.value : null; renderChecks(); renderSheets(); tr.className = (!r.fixture || !r.channel) ? 'need' : r.auto ? 'check' : ''; });
+      const rowClass = () => (!r.fixture || !r.channel || r.universe == null) ? 'need' : (r.auto || r.ocr) ? 'check' : '';
+      tr.className = rowClass();
+      const ch = document.createElement('input'); ch.type = 'number'; ch.id = 'ch-' + r.id; ch.value = r.channel ?? ''; ch.setAttribute('aria-label', 'Channel for ' + (addrText(r) || 'label'));
+      ch.addEventListener('change', () => { r.channel = ch.value ? +ch.value : null; renderChecks(); renderSheets(); tr.className = rowClass(); });
       const td1 = document.createElement('td'); td1.append(ch);
 
       const td2 = document.createElement('td'); td2.className = 'mono';
-      const uIn = document.createElement('input'); uIn.type = 'text'; uIn.id = 'ad-' + r.id; uIn.value = r.universe + '.' + r.address; uIn.style.width = '90px'; uIn.className = 'mono'; uIn.setAttribute('aria-label', 'DMX address');
+      const uIn = document.createElement('input'); uIn.type = 'text'; uIn.id = 'ad-' + r.id; uIn.value = addrText(r); uIn.placeholder = 'u.addr'; uIn.style.width = '90px'; uIn.className = 'mono'; uIn.setAttribute('aria-label', 'DMX address');
       uIn.addEventListener('change', () => { const m = uIn.value.trim().match(/^(\d{1,2})\s*[.\/]\s*(\d{1,3})$/);
-        if (m) { r.universe = +m[1]; r.address = +m[2]; recompute(); render(); } else { toast('Write the address as universe.address, for example 2.177'); uIn.value = r.universe + '.' + r.address; } });
+        if (m) { r.universe = +m[1]; r.address = +m[2]; recompute(); render(); } else { toast('Write the address as universe.address, for example 2.177'); uIn.value = addrText(r); } });
       td2.append(uIn);
 
       const td3 = document.createElement('td'); td3.className = 'mono'; td3.textContent = r.footprint ?? (r.guessFp ? '≈' + r.guessFp : '—');
 
       const td4 = document.createElement('td');
-      const fx = document.createElement('input'); fx.type = 'text'; fx.className = 'fx'; fx.id = 'fx-' + r.id; fx.value = r.fixture || ''; fx.setAttribute('list', 'fxlist'); fx.placeholder = 'Fixture name (Mode)'; fx.setAttribute('aria-label', 'Fixture for ' + r.universe + '.' + r.address);
+      const fx = document.createElement('input'); fx.type = 'text'; fx.className = 'fx'; fx.id = 'fx-' + r.id; fx.value = r.fixture || ''; fx.setAttribute('list', 'fxlist'); fx.placeholder = 'Fixture name (Mode)'; fx.setAttribute('aria-label', 'Fixture for ' + (addrText(r) || 'label'));
       fx.addEventListener('change', () => {
         r.fixture = fx.value.trim(); r.auto = false;
         let n = 0;
@@ -675,9 +992,14 @@ details summary { cursor: pointer; font-weight: 600; }
       td4.append(fx);
 
       const td5 = document.createElement('td');
-      if (!r.fixture) td5.innerHTML = '<span class="tag miss">Needs fixture</span>';
+      const tag = (cls, t) => { const sp = document.createElement('span'); sp.className = 'tag ' + cls; sp.textContent = t; td5.append(sp, ' '); };
+      if (r.universe == null) tag('miss', 'Needs address');
+      if (!r.fixture) tag('miss', 'Needs fixture');
       else if (r.auto) { const b = document.createElement('button'); b.type = 'button'; b.className = 'link'; b.textContent = 'Confirm'; b.title = 'Mark this fixture name as checked';
-        b.addEventListener('click', () => { r.auto = false; render(); }); td5.append(b); }
+        b.addEventListener('click', () => { r.auto = false; r.ocr = false; render(); }); td5.append(b); }
+      else if (r.ocr) { const b = document.createElement('button'); b.type = 'button'; b.className = 'link'; b.textContent = 'Confirm'; b.title = 'Read from a picture of the plan. Mark as checked.';
+        b.addEventListener('click', () => { r.ocr = false; render(); }); td5.append(b); }
+      if (r.ocr) tag('pic', 'From picture');
 
       const td6 = document.createElement('td'); const del = document.createElement('button'); del.type = 'button'; del.className = 'del'; del.textContent = '×'; del.setAttribute('aria-label', 'Remove label ' + (r.channel || ''));
       del.addEventListener('click', () => { rows = rows.filter(o => o !== r); recompute(); render(); });
@@ -687,7 +1009,7 @@ details summary { cursor: pointer; font-weight: 600; }
     if (!rows.length) { const tr = document.createElement('tr'); const td = document.createElement('td'); td.colSpan = 6; td.className = 'status'; td.textContent = 'No labels yet.'; tr.append(td); tb.append(tr); }
   }
 
-  function printOrder() { return rows.slice().sort((a, b) => (a.channel || 1e9) - (b.channel || 1e9) || a.universe - b.universe || a.address - b.address); }
+  function printOrder() { return rows.slice().sort((a, b) => (a.channel || 1e9) - (b.channel || 1e9) || (a.universe ?? 99) - (b.universe ?? 99) || (a.address ?? 0) - (b.address ?? 0)); }
 
   function renderSheets() {
     const box = $('sheets'); box.textContent = '';
@@ -702,7 +1024,7 @@ details summary { cursor: pointer; font-weight: 600; }
         cell.style.gridColumn = (i % 2 === 0) ? '1' : '3'; cell.style.gridRow = String(Math.floor(i / 2) + 1);
         if (r) { const a = document.createElement('div'); a.className = 'n'; a.textContent = r.fixture || 'Fixture needed';
           const b = document.createElement('div'); b.className = 'c'; b.textContent = r.channel ?? '???';
-          const c = document.createElement('div'); c.className = 'a'; c.textContent = r.universe + '.' + r.address; cell.append(a, b, c); }
+          const c = document.createElement('div'); c.className = 'a'; c.textContent = addrText(r) || '?.???'; cell.append(a, b, c); }
         sh.append(cell);
       }
       const cap = document.createElement('figcaption'); cap.className = 'sheetcap'; cap.textContent = `Sheet ${s + 1} of ${n}`;
@@ -742,8 +1064,9 @@ details summary { cursor: pointer; font-weight: 600; }
     return true;
   }
   function warnBlank() {
-    const blank = rows.filter(r => !r.fixture).length;
-    if (blank) setTimeout(() => toast(`${blank} label${blank > 1 ? 's have' : ' has'} no fixture name.`), 2600);
+    const blank = rows.filter(r => !r.fixture).length, noAddr = rows.filter(r => r.universe == null).length;
+    const bits = []; if (blank) bits.push(`${blank} with no fixture name`); if (noAddr) bits.push(`${noAddr} with no address`);
+    if (bits.length) setTimeout(() => toast('Heads up: ' + bits.join(' and ') + '.'), 2600);
   }
   async function withBusy(id, fn) { const b = $(id); b.disabled = true; try { await fn(); } finally { b.disabled = false; } }
 
@@ -783,7 +1106,7 @@ details summary { cursor: pointer; font-weight: 600; }
           const a = document.createElement('div'); a.className = 'pn'; a.textContent = L.fixture || '';
           a.style.fontSize = K.fitNamePt(L.fixture || '', measureMm) + 'pt'; a.style.minHeight = '1.15em';
           const b = document.createElement('div'); b.className = 'pc'; b.textContent = L.channel ?? '';
-          const d = document.createElement('div'); d.className = 'pa'; d.textContent = L.universe + '.' + L.address;
+          const d = document.createElement('div'); d.className = 'pa'; d.textContent = L.universe != null ? L.universe + '.' + L.address : '';
           c.append(a, b, d);
         }
         sh.append(c);

@@ -106,17 +106,106 @@
     return { pairs, loneAddrs };
   }
 
-  /* ---------- 3. Merge pages into one row per DMX address, with checks ---------- */
-  function buildRows(pagesTokens, library) {
+  /* ---------- 2b. Picture-only plans: OCR words -> tokens ----------
+     words: [{text, conf, x0, y0, x1, y1, refined}] in page points (y down), from any rotation.
+     Digits are ~0.72 of the em, so the bbox height is scaled to an em to keep pairing distances the same as text mode. */
+  function overlap(a, b) {
+    const w = Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0), h = Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0);
+    if (w <= 0 || h <= 0) return 0;
+    const area = (r) => (r.x1 - r.x0) * (r.y1 - r.y0);
+    return (w * h) / Math.min(area(a), area(b));
+  }
+  /* Several reads of the same spot (different rotations and sizes) vote: overlapping finds are grouped,
+     and the text with the highest total confidence wins. Valid patch tokens beat anything else. */
+  const VALID_TOKEN = /^(\d{1,2}\/\d{1,3}|\d{3,4})$/;
+  function dedupeWords(words) {
+    const groups = [];
+    words.slice().sort((p, q) => q.conf - p.conf).forEach(w => {
+      const g = groups.find(g => overlap(g.box, w) > 0.4);
+      if (g) g.items.push(w); else groups.push({ box: w, items: [w] });
+    });
+    return groups.map(g => {
+      const tally = new Map();
+      g.items.forEach(w => { const t = w.text.trim(); const v = VALID_TOKEN.test(t);
+        const e = tally.get(t) || { score: 0, best: w, valid: v }; e.score += w.conf; if (w.conf > e.best.conf) e.best = w; tally.set(t, e); });
+      const win = [...tally.values()].sort((p, q) => (q.valid - p.valid) || (q.score - p.score))[0];
+      return Object.assign({}, win.best, { votes: g.items.filter(w => w.text.trim() === win.best.text.trim()).length });
+    });
+  }
+  function tokensFromOcrWords(words, page, minConf) {
+    minConf = minConf == null ? 60 : minConf;
+    const addrs = [], chans = [];
+    for (const w of dedupeWords(words.filter(w => w.conf >= (w.refined ? 35 : minConf)))) {
+      if (w.conf < 50 && (w.votes || 1) < 2) continue;            // a weak read only counts if another read agrees
+      const t = w.text.trim();
+      const cx = (w.x0 + w.x1) / 2, cy = (w.y0 + w.y1) / 2;
+      const size = Math.min(w.x1 - w.x0, w.y1 - w.y0) / 0.72;
+      const m = t.match(ADDR_RE);
+      if (m) {
+        const u = +m[1], a = +m[2];
+        if (u && a && a <= 512) addrs.push({ universe: u, address: a, x: cx, y: cy, size, page, ocr: true, box: w });
+      } else if (CHAN_RE.test(t)) chans.push({ channel: +t, x: cx, y: cy, size, page, ocr: true, box: w });
+    }
+    return { addrs, chans, other: [], words: [], ocr: true };
+  }
+  /* Channels that found no address after the first pass: where to look again, closer up. */
+  function unpairedChannels(tokens) {
+    const { pairs } = pairTokens(tokens.addrs, tokens.chans);
+    const used = new Set(pairs.map(p => p.chan));
+    return tokens.chans.filter(c => !used.has(c));
+  }
+
+  /* ---------- 2c. Symbol key with channel counts ----------
+     lines: [{text, x, y}] top to bottom. Finds "x8 (37 channel/Mode 1)" style lines and the fixture name above. */
+  const COUNT_RE = /(?:x\s*(\d{1,3})\s*)?\(\s*(\d{1,3})\s*ch(?:annel)?s?\b[^)]*?(?:[\/,;-]\s*(mode\s*[\w.\- ]+?))?\s*\)?\s*$/i;
+  function cleanFixtureName(s) {
+    return s.replace(/@/g, ' ').replace(/\.gdtf\b/ig, '').replace(/\s+/g, ' ').trim();
+  }
+  function parseLegendLines(lines) {
+    const out = [];
+    const sorted = lines.filter(l => l.text && l.text.trim()).slice().sort((a, b) => a.y - b.y || a.x - b.x);
+    let lastCountIdx = -1;
+    sorted.forEach((l, i) => {
+      const m = l.text.trim().match(COUNT_RE);
+      if (!m) return;
+      const before = l.text.trim().slice(0, m.index).trim();       // name may be on the same line
+      const nameParts = [];
+      const lh = l.h || 12;
+      for (let j = i - 1; j >= 0 && nameParts.length < 2; j--) {
+        const p = sorted[j];
+        if (Math.abs(p.y - l.y) > lh * 4.5) break;                 // too far above
+        if (Math.abs(p.x - l.x) > lh * 8) continue;                 // another part of the drawing at the same height
+        if (/symbol\s*key|^key$/i.test(p.text.trim())) break;
+        if (COUNT_RE.test(p.text.trim())) break;                     // the entry above
+        nameParts.unshift(p.text.trim());
+      }
+      if (before) nameParts.push(before);
+      lastCountIdx = i;
+      const name = cleanFixtureName(nameParts.join(' '));
+      if (!name || !/[a-z]{3}/i.test(name)) return;
+      const fp = +m[2];
+      const mode = m[3] ? m[3].trim().replace(/^mode\s*/i, 'Mode ') : fp + ' Ch';
+      out.push({ name, mode, footprint: fp, qty: m[1] ? +m[1] : null, fromDrawing: true });
+    });
+    return out;
+  }
+
+  /* ---------- 3. Merge pages into one row per DMX address, with checks ----------
+     opts.legend: fixtures read from the drawing's key (name, mode, footprint, qty) — preferred over the library. */
+  function buildRows(pagesTokens, library, opts) {
     library = library || FIXTURE_LIBRARY;
+    opts = opts || {};
+    const legend = opts.legend || [];
     const byKey = new Map();
     const conflicts = [];
+    const loneChans = [];
     for (const pt of pagesTokens) {
       const { pairs, loneAddrs } = pairTokens(pt.addrs, pt.chans);
+      const pairedChans = new Set(pairs.map(p => p.chan));
       for (const p of pairs) {
         const key = p.addr.universe + '/' + p.addr.address;
         const prev = byKey.get(key);
-        if (!prev) byKey.set(key, { universe: p.addr.universe, address: p.addr.address, channel: p.chan.channel, pages: [p.addr.page] });
+        if (!prev) byKey.set(key, { universe: p.addr.universe, address: p.addr.address, channel: p.chan.channel, pages: [p.addr.page], ocr: !!pt.ocr });
         else {
           if (!prev.pages.includes(p.addr.page)) prev.pages.push(p.addr.page);
           if (prev.channel == null) prev.channel = p.chan.channel;
@@ -125,39 +214,60 @@
       }
       for (const a of loneAddrs) {
         const key = a.universe + '/' + a.address;
-        if (!byKey.has(key)) byKey.set(key, { universe: a.universe, address: a.address, channel: null, pages: [a.page] });
+        if (!byKey.has(key)) byKey.set(key, { universe: a.universe, address: a.address, channel: null, pages: [a.page], ocr: !!pt.ocr });
       }
+      pt.chans.forEach(c => { if (!pairedChans.has(c)) loneChans.push({ channel: c.channel, page: c.page, ocr: !!pt.ocr }); });
     }
     const rows = [...byKey.values()].sort((p, q) => p.universe - q.universe || p.address - q.address);
+
+    // A channel number with no readable address beside it still gets a row when it belongs to a run
+    // already on the plan (e.g. 101 when 102–106 were found). Dimensions like 3775 are ignored.
+    const known = new Set(rows.map(r => r.channel).filter(c => c != null));
+    const orphanRows = [];
+    for (const c of loneChans) {
+      if (known.has(c.channel)) continue;
+      const block = Math.floor(c.channel / 100);
+      const run = [...known].filter(k => Math.floor(k / 100) === block);
+      if (run.length >= 2 && c.channel >= Math.min(...run) - 2 && c.channel <= Math.max(...run) + 2) {
+        known.add(c.channel);
+        orphanRows.push({ universe: null, address: null, channel: c.channel, pages: [c.page], ocr: c.ocr, fixture: '', suggestions: [] });
+      }
+    }
 
     // footprint = gap to next address in same universe
     rows.forEach((r, i) => {
       const n = rows[i + 1];
       r.footprint = (n && n.universe === r.universe) ? n.address - r.address : null;
     });
-    // last fixture in a universe: assume same footprint as the one before if it was the same gap pattern
+    // last fixture in a universe: assume same footprint as the one before
     rows.forEach((r, i) => {
       if (r.footprint == null) {
         const p = rows[i - 1];
         r.footprintGuess = (p && p.universe === r.universe) ? p.footprint : null;
       }
     });
-    // suggest fixture from footprint (only if exactly one library match)
+    // name from footprint: the drawing's own key first, then the library (only when exactly one matches)
     rows.forEach(r => {
       const fp = r.footprint != null ? r.footprint : r.footprintGuess;
-      const hits = library.filter(f => f.footprint === fp);
+      const fromKey = legend.filter(f => f.footprint === fp);
+      const hits = fromKey.length ? fromKey : library.filter(f => f.footprint === fp);
       r.suggestions = hits;
       r.fixture = hits.length === 1 ? hits[0].name + ' (' + hits[0].mode + ')' : '';
+      r.fromKey = fromKey.length === 1;
     });
 
-    // checks
+    const all = rows.concat(orphanRows);
+    return { rows: all, issues: checkRows(all, conflicts, legend) };
+  }
+
+  function checkRows(rows, conflicts, legend) {
     const issues = [];
-    conflicts.forEach(c => issues.push({ type: 'conflict', msg: `${c.key} has channel ${c.channels[0]} on one page and ${c.channels[1]} on page ${c.page}` }));
-    rows.filter(r => r.channel == null).forEach(r => issues.push({ type: 'missing', msg: `${r.universe}.${r.address} has no channel number next to it` }));
+    (conflicts || []).forEach(c => issues.push({ type: 'conflict', msg: `${c.key} has channel ${c.channels[0]} on one page and ${c.channels[1]} on page ${c.page}` }));
+    rows.filter(r => r.universe == null).forEach(r => issues.push({ type: 'missing', msg: `Channel ${r.channel} has no readable address next to it. Add it in the table.` }));
+    rows.filter(r => r.universe != null && r.channel == null).forEach(r => issues.push({ type: 'missing', msg: `${r.universe}.${r.address} has no channel number next to it` }));
     const seen = new Map();
-    rows.forEach(r => { if (r.channel != null) { const k = r.channel; seen.set(k, (seen.get(k) || []).concat(r.universe + '.' + r.address)); } });
+    rows.forEach(r => { if (r.channel != null) { const k = r.channel; seen.set(k, (seen.get(k) || []).concat(r.universe != null ? r.universe + '.' + r.address : 'no address')); } });
     for (const [ch, list] of seen) if (list.length > 1) issues.push({ type: 'duplicate', msg: `Channel ${ch} is on ${list.join(' and ')}` });
-    // gaps inside a run of channels (e.g. 501,502,504)
     const chs = [...seen.keys()].sort((a, b) => a - b);
     for (let i = 1; i < chs.length; i++) {
       const g = chs[i] - chs[i - 1];
@@ -166,11 +276,18 @@
         issues.push({ type: 'gap', msg: `Channel ${missing.join(', ')} not found between ${chs[i - 1]} and ${chs[i]}` });
       }
     }
-    return { rows, issues };
+    // the key's quantities against what was found
+    (legend || []).forEach(f => {
+      if (f.qty == null) return;
+      const label = f.name + ' (' + f.mode + ')';
+      const n = rows.filter(r => r.fixture === label).length;
+      if (n !== f.qty) issues.push({ type: 'count', msg: `The key says ${f.qty} × ${f.name}, but ${n} label${n === 1 ? ' is' : 's are'} set to it.` });
+    });
+    return issues;
   }
 
   function sortForLabels(rows) {
-    return rows.slice().sort((a, b) => (a.channel ?? 1e9) - (b.channel ?? 1e9) || a.universe - b.universe || a.address - b.address);
+    return rows.slice().sort((a, b) => (a.channel ?? 1e9) - (b.channel ?? 1e9) || (a.universe ?? 99) - (b.universe ?? 99) || (a.address ?? 0) - (b.address ?? 0));
   }
 
   /* ---------- 4. Word document on the Avery 16-per-sheet layout ----------
@@ -192,7 +309,7 @@
     const b = border === 'none' ? '' :
       `<w:tcBorders>${['top', 'left', 'bottom', 'right'].map(s => `<w:${s} w:val="single" w:sz="4" w:space="0" w:color="${border === 'black' ? '000000' : 'C8C8C8'}"/>`).join('')}</w:tcBorders>`;
     const body = lbl
-      ? para(lbl.fixture || '', 28, false) + para(lbl.channel != null ? String(lbl.channel) : '', 56, true) + para(lbl.universe + '.' + lbl.address, 28, false)
+      ? para(lbl.fixture || '', 28, false) + para(lbl.channel != null ? String(lbl.channel) : '', 56, true) + para(lbl.universe != null ? lbl.universe + '.' + lbl.address : '', 28, false)
       : para('', 28, false);
     return `<w:tc><w:tcPr><w:tcW w:w="${TW.cellW}" w:type="dxa"/>${b}<w:vAlign w:val="center"/></w:tcPr>${body}</w:tc>`;
   }
@@ -303,7 +420,7 @@
         doc.setFont('helvetica', 'bold'); doc.setFontSize(GEO.pt.chan);
         if (L.channel != null) doc.text(String(L.channel), cx, y0 + hName + hChan * 0.8, { align: 'center' });
         doc.setFont('helvetica', 'normal'); doc.setFontSize(GEO.pt.addr);
-        doc.text(L.universe + '.' + L.address, cx, y0 + hName + hChan + hAddr * 0.78, { align: 'center' });
+        if (L.universe != null) doc.text(L.universe + '.' + L.address, cx, y0 + hName + hChan + hAddr * 0.78, { align: 'center' });
       }
     }
     return doc;
@@ -322,6 +439,6 @@
     return [...out].map(([name, count]) => ({ name, count }));
   }
 
-  const api = { FIXTURE_LIBRARY, extractTokens, extractLegend, pairTokens, buildRows, sortForLabels, buildDocx, buildPdf, fitNamePt, cellOrigin, GEO, mergeRuns, _TW: TW };
+  const api = { FIXTURE_LIBRARY, extractTokens, extractLegend, tokensFromOcrWords, unpairedChannels, parseLegendLines, cleanFixtureName, checkRows, dedupeWords, pairTokens, buildRows, sortForLabels, buildDocx, buildPdf, fitNamePt, cellOrigin, GEO, mergeRuns, _TW: TW };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.KudosLabels = api;
 })(this);
