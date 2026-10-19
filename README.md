@@ -57,7 +57,7 @@ Matches the Kudos Avery template: A4, 8 rows × 3 columns (column 2 is a 3 mm gu
 | `core.js` | PDF parsing, pairing, checks and the .docx builder. No DOM, so it can be reused or tested in Node. |
 | `src/index.src.html` | Page source; `/*@@CORE@@*/` is replaced by `core.js`. |
 | `build.mjs` | `node build.mjs` rebuilds `index.html`. |
-| `ocr/` | tesseract.js worker, engine (`.wasm.js`) and English data, used only for picture plans. |
+| `ocr/` | tesseract.js worker, engine (`.wasm.js`) and English data (base64 text, so any host will serve it), used only for picture plans. `kudos-ocr-worker.js` feeds the data to the engine. |
 
 Libraries load from cdnjs: pdf.js 3.11.174, JSZip 3.10.1 and jsPDF 2.5.1, plus tesseract.js 5.1.1 from jsDelivr when a picture plan is loaded. Nothing is uploaded anywhere; the PDF is read in the browser.
 

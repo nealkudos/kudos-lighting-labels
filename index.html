@@ -720,7 +720,7 @@ details summary { cursor: pointer; font-weight: 600; }
   async function getOcr() {
     if (!window.Tesseract) await loadScript(TESS_SRC);
     if (!ocrWorker) ocrWorker = await Tesseract.createWorker('eng', 1, {
-      workerPath: OCR_BASE + 'worker.min.js', corePath: OCR_BASE, langPath: OCR_BASE,
+      workerPath: OCR_BASE + 'kudos-ocr-worker.js', corePath: OCR_BASE, langPath: OCR_BASE,
       workerBlobURL: false, gzip: true, cacheMethod: 'none',
       logger: (m) => { if (ocrProgress && m.status === 'recognizing text') ocrProgress(m.progress); }
     });
