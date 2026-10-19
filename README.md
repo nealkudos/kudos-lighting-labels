@@ -46,6 +46,16 @@ Some Vectorworks exports come out as an image with no text in them (the GH Great
 3. Anything still unclear gets a tight re-read on its own.
 4. The Symbol Key is read with letters. Lines like `x8 (37 channel/Mode 1)` give each fixture's name, mode and channel count, and the counts are checked against the labels.
 
+Before reading, each picture is cleaned: coloured ink and solid fixture symbols (anything much thicker than a pen stroke, plus whatever it touches) are removed, and grey text is darkened. Blurry plans (a screenshot pasted into the drawing, like the GH stage plan) read best small, so the page is also read whole at 150, 200 and 250 dpi and those reads join the vote.
+
+Where the drawing itself hides a number (a symbol sitting on top of the text), the tool fills it in from the plan's own structure, and marks the row **Inferred** with the reason in Checks:
+
+- **Universe from the channel.** Kudos channels start with their universe (805 is in universe 8). When most of the plan follows that, a hidden or misread universe digit is taken from the channel.
+- **Unclear address decoded.** An address read as `9254` or `71256` beside channel 905 or 704 is decoded to `9/254` or `7/256`. Only a single possible reading is accepted.
+- **Odd one out on a truss.** On a line of fixtures where every channel but one starts with 9, the odd one (`301`) is corrected (`901`).
+- **Spacing from the key.** Addresses step by the fixture channel counts in the Symbol Key. An address one digit off from where the spacing puts it is corrected. A gap with room for exactly one key fixture is filled with the one missing channel. A universe that starts above 1 by exactly one key fixture gets that fixture at `/1`.
+- **Channel order.** When a universe's channels rise with its addresses, an address with no readable channel takes the next free number.
+
 Rows read this way are marked **From picture** and need confirming. A picture plan takes about 20 seconds on a laptop; a text PDF is instant. Re-exporting with text kept as text is still the most reliable route.
 
 Picture reading uses [tesseract.js](https://github.com/naptha/tesseract.js) 5.1.1 (Apache 2.0). Its engine and English data are in `ocr/` and must be served next to `index.html`.

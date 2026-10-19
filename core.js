@@ -117,7 +117,7 @@
   }
   /* Several reads of the same spot (different rotations and sizes) vote: overlapping finds are grouped,
      and the text with the highest total confidence wins. Valid patch tokens beat anything else. */
-  const VALID_TOKEN = /^(\d{1,2}\/\d{1,3}|\d{3,4})$/;
+  const VALID_TOKEN = /^(\d{1,2}\/\d{1,3}|\/\d{1,3}|\d{3,4})$/;
   function dedupeWords(words) {
     const groups = [];
     words.slice().sort((p, q) => q.conf - p.conf).forEach(w => {
@@ -134,19 +134,27 @@
   }
   function tokensFromOcrWords(words, page, minConf) {
     minConf = minConf == null ? 60 : minConf;
-    const addrs = [], chans = [];
-    for (const w of dedupeWords(words.filter(w => w.conf >= (w.refined ? 35 : minConf)))) {
-      if (w.conf < 50 && (w.votes || 1) < 2) continue;            // a weak read only counts if another read agrees
+    const addrs = [], chans = [], raws = [];
+    for (const w of dedupeWords(words.filter(w => w.text && w.text.trim()))) {
       const t = w.text.trim();
       const cx = (w.x0 + w.x1) / 2, cy = (w.y0 + w.y1) / 2;
       const size = Math.min(w.x1 - w.x0, w.y1 - w.y0) / 0.72;
-      const m = t.match(ADDR_RE);
+      // unclear address-like reads ("9254", "71256", "7/353" at low confidence) are kept for decoding next to a channel
+      const weak = w.conf < 50 && (w.votes || 1) < 2 && !(w.conf >= 35 && w.refined);
+      if (/^[\d\/]{3,7}$/.test(t) && /\d{2}/.test(t) && (t.includes('/') || t.length >= 4) && (weak || !ADDR_RE.test(t))) {
+        raws.push({ text: t, x: cx, y: cy, size, page, conf: w.conf });
+        if (weak || !ADDR_RE.test(t)) continue;
+      }
+      if (weak) continue;                                            // a weak read only counts if another read agrees
+      const m = t.match(ADDR_RE), part = t.match(/^\/(\d{1,3})$/);   // "/353": universe hidden under a symbol
       if (m) {
         const u = +m[1], a = +m[2];
         if (u && a && a <= 512) addrs.push({ universe: u, address: a, x: cx, y: cy, size, page, ocr: true, box: w });
+      } else if (part && +part[1] && +part[1] <= 512) {
+        addrs.push({ universe: null, address: +part[1], x: cx, y: cy, size, page, ocr: true, box: w });
       } else if (CHAN_RE.test(t)) chans.push({ channel: +t, x: cx, y: cy, size, page, ocr: true, box: w });
     }
-    return { addrs, chans, other: [], words: [], ocr: true };
+    return { addrs, chans, raws, other: [], words: [], ocr: true };
   }
   /* Channels that found no address after the first pass: where to look again, closer up. */
   function unpairedChannels(tokens) {
@@ -155,20 +163,76 @@
     return tokens.chans.filter(c => !used.has(c));
   }
 
-  /* ---------- 2c. Symbol key with channel counts ----------
-     lines: [{text, x, y}] top to bottom. Finds "x8 (37 channel/Mode 1)" style lines and the fixture name above. */
-  const COUNT_RE = /(?:x\s*(\d{1,3})\s*)?\(\s*(\d{1,3})\s*ch(?:annel)?s?\b[^)]*?(?:[\/,;-]\s*(mode\s*[\w.\- ]+?))?\s*\)?\s*$/i;
+  /* ---------- 2b'. Clean a picture before reading it ----------
+     d: RGBA pixels (modified in place), w × h. digitPx: expected digit height in pixels.
+     1) coloured ink -> paper (fixture symbols, blue labels);
+     2) solid shapes much thicker than a pen stroke -> paper (filled fixture symbols touching the numbers);
+     3) stretch grey text to black (some exports render callouts in mid grey). */
+  function cleanPixels(d, w, h, digitPx) {
+    const n = w * h, g = new Uint8Array(n);
+    for (let i = 0, p = 0; p < n; i += 4, p++) {
+      const mx = Math.max(d[i], d[i + 1], d[i + 2]), mn = Math.min(d[i], d[i + 1], d[i + 2]);
+      g[p] = (mx - mn > 50) ? 255 : (d[i] + d[i + 1] + d[i + 2]) / 3;
+    }
+    const k = Math.max(3, Math.round(0.45 * (digitPx || 20)));       // thicker than any stroke of a digit
+    const W = w + 1;
+    const I1 = new Int32Array(W * (h + 1));
+    for (let y = 0; y < h; y++) { let row = 0; for (let x = 0; x < w; x++) { row += g[y * w + x] < 110 ? 1 : 0; I1[(y + 1) * W + x + 1] = I1[y * W + x + 1] + row; } }
+    // seeds: centres of k×k squares that are entirely dark — only solid shapes have them
+    const removed = new Uint8Array(n), stack = new Int32Array(n);
+    let sp = 0;
+    const half = k >> 1;
+    for (let y = half; y + k - half <= h; y++) for (let x = half; x + k - half <= w; x++) {
+      const x0 = x - half, y0 = y - half, x1 = x0 + k, y1 = y0 + k;
+      if (I1[y1 * W + x1] - I1[y0 * W + x1] - I1[y1 * W + x0] + I1[y0 * W + x0] === k * k) {
+        const p = y * w + x; if (!removed[p]) { removed[p] = 1; stack[sp++] = p; }
+      }
+    }
+    // grow each solid shape through everything dark it touches, so its thin edges and frames go too
+    while (sp) {
+      const p = stack[--sp], x = p % w, y = (p / w) | 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+        const q = yy * w + xx; if (!removed[q] && g[q] < 110) { removed[q] = 1; stack[sp++] = q; }
+      }
+    }
+    // clear the removed shapes plus a small halo of anti-aliasing
+    const r = Math.max(2, Math.round(k / 12));
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      if (!removed[y * w + x]) continue;
+      for (let yy = Math.max(0, y - r); yy <= Math.min(h - 1, y + r); yy++)
+        for (let xx = Math.max(0, x - r); xx <= Math.min(w - 1, x + r); xx++) g[yy * w + xx] = 255;
+    }
+    // levels: anything at or below 60 is black, 215 and up is paper
+    for (let i = 0, p = 0; p < n; i += 4, p++) {
+      const v = Math.max(0, Math.min(255, Math.round((g[p] - 60) * 255 / 155)));
+      d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 255;
+    }
+    return d;
+  }
+
+  // A key line that gives a channel count: "x8 (37 channel/Mode 1)", "8x (97 Channel )", "4x 61 (Channel)", "(43 Ch)"
+  function parseCountLine(text) {
+    const t = text.replace(/[\u2018\u2019]/g, "'");
+    const fp = t.match(/(\d{1,3})\s*\(?\s*ch(?:annel)?s?\b/i) || t.match(/\(\s*(\d{1,3})\s*ch/i);
+    if (!fp) return null;
+    const qty = t.match(/(?:^|[\s(])(\d{1,3})\s*[x×]\b/i) || t.match(/\b[x×]\s*(\d{1,3})\b/i);
+    const mode = t.match(/mode\s*([\w.\-]+(?:\s+[\w.\-]+)?)/i);
+    // where the count part starts: anything before it on the same line is the fixture name
+    const starts = [fp.index, qty ? qty.index : Infinity, t.search(/\(/)].filter(i => i >= 0);
+    const before = t.slice(0, Math.min(...starts)).trim();
+    return { footprint: +fp[1], qty: qty ? +qty[1] : null, mode: mode ? 'Mode ' + mode[1].trim().replace(/\)+$/, '') : null, before };
+  }
+  const COUNT_RE = { test: (s) => !!parseCountLine(s) };
   function cleanFixtureName(s) {
     return s.replace(/@/g, ' ').replace(/\.gdtf\b/ig, '').replace(/\s+/g, ' ').trim();
   }
   function parseLegendLines(lines) {
     const out = [];
     const sorted = lines.filter(l => l.text && l.text.trim()).slice().sort((a, b) => a.y - b.y || a.x - b.x);
-    let lastCountIdx = -1;
     sorted.forEach((l, i) => {
-      const m = l.text.trim().match(COUNT_RE);
-      if (!m) return;
-      const before = l.text.trim().slice(0, m.index).trim();       // name may be on the same line
+      const c = parseCountLine(l.text.trim());
+      if (!c) return;
       const nameParts = [];
       const lh = l.h || 12;
       for (let j = i - 1; j >= 0 && nameParts.length < 2; j--) {
@@ -176,16 +240,13 @@
         if (Math.abs(p.y - l.y) > lh * 4.5) break;                 // too far above
         if (Math.abs(p.x - l.x) > lh * 8) continue;                 // another part of the drawing at the same height
         if (/symbol\s*key|^key$/i.test(p.text.trim())) break;
-        if (COUNT_RE.test(p.text.trim())) break;                     // the entry above
+        if (parseCountLine(p.text.trim())) break;                   // the entry above
         nameParts.unshift(p.text.trim());
       }
-      if (before) nameParts.push(before);
-      lastCountIdx = i;
+      if (c.before && /[a-z]{3}/i.test(c.before)) nameParts.push(c.before);
       const name = cleanFixtureName(nameParts.join(' '));
       if (!name || !/[a-z]{3}/i.test(name)) return;
-      const fp = +m[2];
-      const mode = m[3] ? m[3].trim().replace(/^mode\s*/i, 'Mode ') : fp + ' Ch';
-      out.push({ name, mode, footprint: fp, qty: m[1] ? +m[1] : null, fromDrawing: true });
+      out.push({ name, mode: c.mode || c.footprint + ' Ch', footprint: c.footprint, qty: c.qty, fromDrawing: true });
     });
     return out;
   }
@@ -213,17 +274,9 @@
     for (const page of pages) {
       const labs = labels.filter(l => l.page === page);
       const pts = [];
-      rows.forEach(r => (r.at || []).forEach(a => { if (a.page === page) pts.push({ r, x: a.x, y: a.y, em: a.size || 8 }); }));
+      rows.forEach(r => (r.at || []).forEach(a => { if (a.page === page) pts.push({ r, x: a.x, y: a.y, em: a.size || 8, page }); }));
       if (!pts.length) continue;
-      const parent = pts.map((_, i) => i);
-      const find = (i) => parent[i] === i ? i : (parent[i] = find(parent[i]));
-      for (let i = 0; i < pts.length; i++) for (let j = i + 1; j < pts.length; j++) {
-        const a = pts[i], b = pts[j], em = Math.max(a.em, b.em);
-        const dx = Math.abs(a.x - b.x), dy = Math.abs(a.y - b.y);
-        if ((dy < 1.5 * em && dx < 14 * em) || (dx < 1.5 * em && dy < 14 * em)) parent[find(i)] = find(j);
-      }
-      const groups = new Map();
-      pts.forEach((p, i) => { const k = find(i); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(p); });
+      const groups = new Map(lineGroups(pts).map((g, i) => [i, g]));
       for (const g of groups.values()) {
         const x0 = Math.min(...g.map(p => p.x)), x1 = Math.max(...g.map(p => p.x));
         const y0 = Math.min(...g.map(p => p.y)), y1 = Math.max(...g.map(p => p.y));
@@ -237,6 +290,195 @@
         if (best && best.d < 30 * em) g.forEach(p => { if (!p.r.position) p.r.position = best.name; });
       }
     }
+  }
+
+  /* An unclear address read beside channel 905: "9254" -> 254, "91254" -> 254 (slash read as 1), "/353" -> 353.
+     Only a single possible reading is accepted. */
+  function decodeAddress(raw, U) {
+    const t = String(raw).replace(/[^\d\/]/g, ''), us = String(U), out = new Set();
+    const tryFrom = (s) => {
+      if (!s.startsWith(us)) return;
+      const rest = s.slice(us.length);
+      for (const sep of ['/', '', '1', '7']) {
+        if (sep && !rest.startsWith(sep)) continue;
+        const a = rest.slice(sep.length);
+        if (/^\d{1,3}$/.test(a) && +a >= 1 && +a <= 512) out.add(+a);
+      }
+    };
+    if (t.startsWith('/')) tryFrom(us + t);
+    else {
+      tryFrom(t);
+      if (!out.size && t.length > 2) tryFrom(t.slice(1));             // a stray mark read in front ("37/353")
+      if (!out.size && t.length > 2) tryFrom(us + t.slice(1));        // first digit misread ("8190" beside 603)
+    }
+    return out.size === 1 ? [...out][0] : null;
+  }
+  /* Rows whose callouts line up across or down the page (one truss or boom each). */
+  function lineGroups(items) {                       // items: [{x, y, em, page, ref}]
+    // one bad read can report a huge text size; keep every size near the plan's typical one
+    const ems = items.map(it => it.em).sort((a, b) => a - b), med = ems.length ? ems[ems.length >> 1] : 8;
+    items.forEach(it => { it.em = Math.min(Math.max(it.em, med * 0.6), med * 1.5); });
+    // link down columns and along rows separately; each fixture joins whichever of its two lines is longer,
+    // so neighbouring columns don't merge through their side-by-side rows
+    const linkUp = (vertical) => {
+      const parent = items.map((_, i) => i);
+      const find = (i) => parent[i] === i ? i : (parent[i] = find(parent[i]));
+      for (let i = 0; i < items.length; i++) for (let j = i + 1; j < items.length; j++) {
+        const a = items[i], b = items[j]; if (a.page !== b.page) continue;
+        const em = Math.max(a.em, b.em), dx = Math.abs(a.x - b.x), dy = Math.abs(a.y - b.y);
+        if (vertical ? (dx < 1.5 * em && dy < 14 * em) : (dy < 1.5 * em && dx < 14 * em)) parent[find(i)] = find(j);
+      }
+      const root = items.map((_, i) => find(i)), size = new Map();
+      root.forEach(r => size.set(r, (size.get(r) || 0) + 1));
+      return { root, size };
+    };
+    const V = linkUp(true), Hh = linkUp(false);
+    const groups = new Map();
+    items.forEach((it, i) => {
+      const sv = V.size.get(V.root[i]), sh = Hh.size.get(Hh.root[i]);
+      const k = sv >= sh ? 'V' + V.root[i] : 'H' + Hh.root[i];
+      if (!groups.has(k)) groups.set(k, []); groups.get(k).push(it);
+    });
+    return [...groups.values()];
+  }
+  /* On one line of fixtures, a single channel whose first digit differs from all the rest is a misread (403 among 802–805). */
+  function fixChannelOutliers(rows) {
+    const dbg = api.debug || null;
+    const items = [];
+    rows.forEach(r => { const a = (r.at || [])[0]; if (a && r.channel != null && r.channel < 1000) items.push({ x: a.x, y: a.y, em: a.size || 8, page: a.page, ref: r }); });
+    const used = new Set(rows.map(r => r.channel).filter(c => c != null));
+    lineGroups(items).forEach(g => {
+      if (dbg) dbg({ r: { x0: 0, y0: 0, x1: 0, y1: 0 }, rot: 'group', score: g.length, text: g.map(it => it.ref.channel + '@' + Math.round(it.x) + ',' + Math.round(it.y) + '/em' + it.em.toFixed(1)).join(' ') });
+      if (g.length < 3) return;
+      const count = new Map(); g.forEach(it => { const b = Math.floor(it.ref.channel / 100); count.set(b, (count.get(b) || 0) + 1); });
+      const [top, n] = [...count].sort((a, b) => b[1] - a[1])[0];
+      const outliers = g.filter(it => Math.floor(it.ref.channel / 100) !== top);
+      if (n / g.length < 0.75 || outliers.length > Math.max(1, Math.floor(g.length / 5))) return;
+      outliers.forEach(it => {
+        const r = it.ref, c = top * 100 + (r.channel % 100);
+        if (used.has(c) || c % 100 === 0) return;
+        used.delete(r.channel); used.add(c);
+        r.readChannel = r.channel; r.channel = c; r.inferred = 'channel-fixed';
+      });
+    });
+  }
+
+  /* ---------- 2e. Kudos numbering: channel 805 lives in universe 8 ----------
+     When most of the plan follows that rule, use it to fill what the drawing hides:
+     a universe digit covered by a fixture symbol, or the one channel number missing from a universe's run.
+     Every row filled this way is marked inferred so it gets checked. */
+  function repairByConvention(rows, orphans, footprints) {
+    const H = (c) => Math.floor(c / 100);
+    const paired = rows.filter(r => r.channel != null && r.universe != null);
+    const follow = paired.filter(r => r.universe === H(r.channel)).length;
+    if (paired.length < 4 || follow / paired.length < 0.75) return;
+    const keyOf = (u, a) => u + '/' + a;
+    const taken = new Set(rows.filter(r => r.universe != null).map(r => keyOf(r.universe, r.address)));
+    // a) universe missing or misread on a row whose channel is clear
+    rows.forEach(r => {
+      if (r.channel == null) return;
+      const u = H(r.channel);
+      if (r.universe === u || taken.has(keyOf(u, r.address))) return;
+      if (r.universe != null) taken.delete(keyOf(r.universe, r.address));
+      r.inferred = r.universe == null ? 'universe-hidden' : 'universe-fixed';
+      r.readUniverse = r.universe; r.universe = u; taken.add(keyOf(u, r.address));
+    });
+    // b) an address with no channel: the channel left over in that universe
+    const used = new Set(rows.map(r => r.channel).filter(c => c != null));
+    const lone = rows.filter(r => r.channel == null && r.universe != null);
+    const universes = [...new Set(lone.map(r => r.universe))];
+    universes.forEach(u => {
+      const mine = lone.filter(r => r.universe === u);
+      if (mine.length !== 1) return;
+      const r = mine[0];
+      const orphan = orphans.filter(o => o.universe == null && o.address == null && H(o.channel) === u);
+      if (orphan.length === 1) {                                     // a channel was read but sat too far away
+        r.channel = orphan[0].channel; r.inferred = 'channel-matched';
+        orphans.splice(orphans.indexOf(orphan[0]), 1); return;
+      }
+      if (orphan.length) return;
+      const idx = [...used].filter(c => H(c) === u).map(c => c % 100);
+      if (!idx.length) return;
+      const max = Math.max(...idx), missing = [];
+      for (let i = 1; i <= max; i++) if (!idx.includes(i)) missing.push(i);
+      const pick = missing.length === 1 ? missing[0] : missing.length === 0 ? max + 1 : null;
+      if (pick == null) return;
+      r.channel = u * 100 + pick; r.inferred = 'channel-gap'; used.add(r.channel);
+    });
+    const fpList = [...new Set((footprints || []).filter(Boolean))];
+    const splits = (g) => { const out = new Set(); fpList.forEach(a => { if (fpList.includes(g - a)) out.add(a); }); return [...out]; };
+    const oneDigitOff = (a, b) => { const x = String(a), y = String(b); return x.length === y.length && [...x].filter((ch, i) => ch !== y[i]).length === 1; };
+    const sortedIn = (u) => rows.filter(r => r.universe === u).sort((p, q) => p.address - q.address);
+    // d) an address one digit off from where the spacing says it must be (7.169 between 7.62 and 7.256 -> 7.159)
+    if (fpList.length) [...new Set(rows.filter(r => r.universe != null).map(r => r.universe))].forEach(u => {
+      const list = sortedIn(u);
+      for (let i = 1; i < list.length - 1; i++) {
+        const p = list[i - 1], r = list[i], n = list[i + 1];
+        if (fpList.includes(r.address - p.address) && fpList.includes(n.address - r.address)) continue;
+        const cands = splits(n.address - p.address).map(a => p.address + a).filter(c => oneDigitOff(c, r.address));
+        if (cands.length === 1 && !taken.has(keyOf(u, cands[0]))) {
+          taken.delete(keyOf(u, r.address)); r.readAddress = r.address; r.address = cands[0]; taken.add(keyOf(u, r.address)); r.inferred = 'address-fixed';
+        }
+      }
+    });
+    // e) a fixture missing between two others (6.62 … 6.190 with 64-ch fixtures either side -> one at 6.126)
+    if (fpList.length) [...new Set(rows.filter(r => r.universe != null).map(r => r.universe))].forEach(u => {
+      const list = sortedIn(u);
+      for (let i = 0; i < list.length - 1; i++) {
+        const p = list[i], n = list[i + 1], g = n.address - p.address;
+        if (fpList.includes(g) || p.channel == null || n.channel == null) continue;
+        const sp = splits(g); if (sp.length !== 1) continue;
+        const addr = p.address + sp[0];
+        if (taken.has(keyOf(u, addr))) continue;
+        const between = (c) => c > Math.min(p.channel, n.channel) && c < Math.max(p.channel, n.channel);
+        const oi = orphans.findIndex(o => o.universe == null && o.channel != null && Math.floor(o.channel / 100) === u && between(o.channel));
+        let ch = null, how = 'gap-fill-read', at = [];
+        if (oi >= 0 && orphans.filter(o => o.universe == null && o.channel != null && Math.floor(o.channel / 100) === u && between(o.channel)).length === 1) {
+          ch = orphans[oi].channel; at = orphans[oi].at || []; orphans.splice(oi, 1);
+        } else {
+          const free = []; for (let c = Math.min(p.channel, n.channel) + 1; c < Math.max(p.channel, n.channel); c++) if (!rows.some(r => r.channel === c)) free.push(c);
+          if (free.length !== 1) continue;
+          ch = free[0]; how = 'gap-fill';
+        }
+        rows.push({ universe: u, address: addr, channel: ch, pages: p.pages.slice(), at, ocr: true, inferred: how });
+        taken.add(keyOf(u, addr));
+      }
+    });
+    // f) addresses with no channel, in a universe where channels rise with the address: give them the next free numbers in order
+    [...new Set(rows.filter(r => r.universe != null && r.channel == null).map(r => r.universe))].forEach(u => {
+      const list = sortedIn(u), known = list.filter(r => r.channel != null);
+      if (known.length < 2 || known.some((r, i) => i && r.channel < known[i - 1].channel) || known.some(r => Math.floor(r.channel / 100) !== u)) return;
+      const usedC = new Set(rows.map(r => r.channel).filter(c => c != null));
+      let last = u * 100;
+      for (let i = 0; i < list.length; i++) {
+        const r = list[i];
+        if (r.channel != null) { last = r.channel; continue; }
+        const nextKnown = list.slice(i + 1).find(x => x.channel != null);
+        let c = last + 1; while (usedC.has(c)) c++;
+        if (nextKnown && c >= nextKnown.channel) continue;
+        if (Math.floor(c / 100) !== u) continue;
+        const oi = orphans.findIndex(o => o.channel === c && o.universe == null);
+        if (oi >= 0) orphans.splice(oi, 1);
+        r.channel = c; r.inferred = 'channel-order'; usedC.add(c); last = c;
+      }
+    });
+    // c) a universe whose first address isn't 1, where the gap is exactly one fixture from the key:
+    //    that fixture is at /1, hidden on the drawing, with the first channel of the universe
+    const fps = new Set((footprints || []).filter(Boolean));
+    const unis = [...new Set(rows.filter(r => r.universe != null).map(r => r.universe))];
+    unis.forEach(u => {
+      const inU = rows.filter(r => r.universe === u);
+      const minA = Math.min(...inU.map(r => r.address));
+      if (minA <= 1 || !fps.has(minA - 1)) return;
+      const chans = inU.map(r => r.channel).filter(c => c != null);
+      const c = u * 100 + 1;
+      if (!chans.length || chans.includes(c) || Math.min(...chans) <= c) return;
+      if (rows.some(r => r.channel === c && r.universe != null)) return;
+      const o = orphans.findIndex(x => x.channel === c && x.universe == null);
+      const at = o >= 0 ? orphans[o].at : [];
+      if (o >= 0) orphans.splice(o, 1);
+      rows.push({ universe: u, address: 1, channel: c, pages: inU[0].pages.slice(), at: at || [], ocr: true, inferred: o >= 0 ? 'leading-gap-read' : 'leading-gap' });
+    });
   }
 
   /* ---------- 3. Merge pages into one row per DMX address, with checks ----------
@@ -269,9 +511,25 @@
         if (!byKey.has(key)) byKey.set(key, { universe: a.universe, address: a.address, channel: null, pages: [a.page], at: [at], ocr: !!pt.ocr });
         else byKey.get(key).at.push(at);
       }
-      pt.chans.forEach(c => { if (!pairedChans.has(c)) loneChans.push({ channel: c.channel, page: c.page, ocr: !!pt.ocr }); });
+      // a channel with no clear address: decode the nearest unclear read beside it
+      const usedRaw = new Set();
+      pt.chans.forEach(c => {
+        if (pairedChans.has(c) || !pt.raws || !pt.raws.length) return;
+        const near = pt.raws.filter(w => !usedRaw.has(w) && Math.hypot(w.x - c.x, w.y - c.y) <= 4 * Math.max(w.size, c.size))
+          .sort((a, b) => Math.hypot(a.x - c.x, a.y - c.y) - Math.hypot(b.x - c.x, b.y - c.y));
+        for (const w of near) {
+          const a = decodeAddress(w.text, Math.floor(c.channel / 100));
+          if (a == null) continue;
+          const u = Math.floor(c.channel / 100), key = u + '/' + a;
+          if (byKey.has(key)) continue;
+          usedRaw.add(w); pairedChans.add(c);
+          byKey.set(key, { universe: u, address: a, channel: c.channel, pages: [c.page], at: [{ page: c.page, x: w.x, y: w.y, size: w.size }], ocr: true, inferred: 'decoded', readAs: w.text });
+          break;
+        }
+      });
+      pt.chans.forEach(c => { if (!pairedChans.has(c)) loneChans.push({ channel: c.channel, page: c.page, ocr: !!pt.ocr, at: [{ page: c.page, x: c.x, y: c.y, size: c.size }] }); });
     }
-    const rows = [...byKey.values()].sort((p, q) => p.universe - q.universe || p.address - q.address);
+    let rows = [...byKey.values()];
 
     // A channel number with no readable address beside it still gets a row when it belongs to a run
     // already on the plan (e.g. 101 when 102–106 were found). Dimensions like 3775 are ignored.
@@ -283,9 +541,14 @@
       const run = [...known].filter(k => Math.floor(k / 100) === block);
       if (run.length >= 2 && c.channel >= Math.min(...run) - 2 && c.channel <= Math.max(...run) + 2) {
         known.add(c.channel);
-        orphanRows.push({ universe: null, address: null, channel: c.channel, pages: [c.page], ocr: c.ocr, fixture: '', suggestions: [] });
+        orphanRows.push({ universe: null, address: null, channel: c.channel, pages: [c.page], at: c.at, ocr: c.ocr, fixture: '', suggestions: [] });
       }
     }
+
+    fixChannelOutliers(rows.concat(orphanRows));
+    repairByConvention(rows, orphanRows, legend.map(f => f.footprint).concat(legend.length ? [] : library.map(f => f.footprint)));
+    orphanRows.push(...rows.filter(r => r.universe == null));        // address still unknown
+    rows = rows.filter(r => r.universe != null).sort((p, q) => p.universe - q.universe || p.address - q.address);
 
     // footprint = gap to next address in same universe
     rows.forEach((r, i) => {
@@ -317,7 +580,24 @@
   function checkRows(rows, conflicts, legend) {
     const issues = [];
     (conflicts || []).forEach(c => issues.push({ type: 'conflict', msg: `${c.key} has channel ${c.channels[0]} on one page and ${c.channels[1]} on page ${c.page}` }));
-    rows.filter(r => r.universe == null).forEach(r => issues.push({ type: 'missing', msg: `Channel ${r.channel} has no readable address next to it. Add it in the table.` }));
+    rows.filter(r => r.universe == null && r.channel != null).forEach(r => issues.push({ type: 'missing', msg: `Channel ${r.channel} has no readable address next to it. Add it in the table.` }));
+    rows.filter(r => r.universe == null && r.channel == null).forEach(r => issues.push({ type: 'missing', msg: `An address ending /${r.address} has no readable universe or channel. Add it in the table, or remove it.` }));
+    rows.filter(r => r.inferred).forEach(r => {
+      const a = r.universe + '.' + r.address;
+      const why = r.inferred === 'universe-hidden' ? `the universe digit is hidden on the drawing, so it was taken from the channel number`
+        : r.inferred === 'universe-fixed' ? `the universe read as ${r.readUniverse}, which doesn't match channel ${r.channel}, so it was taken from the channel number`
+        : r.inferred === 'channel-matched' ? `the channel number was matched to the only unpaired address in universe ${r.universe}`
+        : r.inferred === 'leading-gap' ? `nothing readable at ${r.universe}.1, but universe ${r.universe} starts later by exactly one fixture from the key and ${r.channel} is missing, so it was added`
+        : r.inferred === 'leading-gap-read' ? `channel ${r.channel} was read but its address wasn't; universe ${r.universe} starts later by exactly one fixture from the key, so it was placed at ${r.universe}.1`
+        : r.inferred === 'address-fixed' ? `the address read as ${r.universe}.${r.readAddress}, one digit off from where the fixture spacing puts it`
+        : r.inferred === 'gap-fill' ? `nothing readable here, but the spacing leaves room for exactly one fixture from the key and ${r.channel} is the only channel missing between its neighbours, so it was added`
+        : r.inferred === 'gap-fill-read' ? `channel ${r.channel} was read but its address wasn't; the spacing leaves room for exactly one fixture here`
+        : r.inferred === 'channel-order' ? `the address was read but not the channel; channels in universe ${r.universe} rise with the address, so it takes the next free number`
+        : r.inferred === 'decoded' ? `the address read unclearly as "${r.readAs}" and was decoded using the channel's universe`
+        : r.inferred === 'channel-fixed' ? `the channel read as ${r.readChannel}, the only one on its truss not starting with ${Math.floor(r.channel / 100)}`
+        : `the channel number is hidden on the drawing; ${r.channel} is the only one missing from universe ${r.universe}`;
+      issues.push({ type: 'inferred', msg: `${r.channel} at ${a}: ${why}. Check it.` });
+    });
     rows.filter(r => r.universe != null && r.channel == null).forEach(r => issues.push({ type: 'missing', msg: `${r.universe}.${r.address} has no channel number next to it` }));
     const seen = new Map();
     rows.forEach(r => { if (r.channel != null) { const k = r.channel; seen.set(k, (seen.get(k) || []).concat(r.universe != null ? r.universe + '.' + r.address : 'no address')); } });
@@ -496,6 +776,6 @@
     return [...out].map(([name, count]) => ({ name, count }));
   }
 
-  const api = { addrLine, positionName, positionLabelsFromWords, assignPositions, FIXTURE_LIBRARY, extractTokens, extractLegend, tokensFromOcrWords, unpairedChannels, parseLegendLines, cleanFixtureName, checkRows, dedupeWords, pairTokens, buildRows, sortForLabels, buildDocx, buildPdf, fitNamePt, cellOrigin, GEO, mergeRuns, _TW: TW };
+  const api = { decodeAddress, fixChannelOutliers, lineGroups, repairByConvention, parseCountLine, cleanPixels, addrLine, positionName, positionLabelsFromWords, assignPositions, FIXTURE_LIBRARY, extractTokens, extractLegend, tokensFromOcrWords, unpairedChannels, parseLegendLines, cleanFixtureName, checkRows, dedupeWords, pairTokens, buildRows, sortForLabels, buildDocx, buildPdf, fitNamePt, cellOrigin, GEO, mergeRuns, _TW: TW };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.KudosLabels = api;
 })(this);

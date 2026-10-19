@@ -224,6 +224,7 @@ details summary { cursor: pointer; font-weight: 600; }
 (function () {
   'use strict';
   const K = window.KudosLabels;
+  K.debug = (x) => { if (window.__kudosDebug) window.__kudosDebug.push(x); };
   const $ = (id) => document.getElementById(id);
   if (window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
@@ -311,6 +312,12 @@ details summary { cursor: pointer; font-weight: 600; }
     }
     ctx.putImageData(im, 0, 0); return c;
   }
+  // Clean a picture before reading: coloured ink and solid symbols out, grey text darkened (see core cleanPixels)
+  function cleanCanvas(c, digitPx) {
+    const ctx = c.getContext('2d'), im = ctx.getImageData(0, 0, c.width, c.height);
+    K.cleanPixels(im.data, c.width, c.height, digitPx);
+    ctx.putImageData(im, 0, 0); return c;
+  }
   function padCanvas(src, pad) {
     const c = document.createElement('canvas'); c.width = src.width + 2 * pad; c.height = src.height + 2 * pad;
     const ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height); ctx.drawImage(src, pad, pad); return c;
@@ -321,7 +328,7 @@ details summary { cursor: pointer; font-weight: 600; }
     const p = [unrotate(rot, b.x0, b.y0, W, H), unrotate(rot, b.x1, b.y1, W, H)];
     return { x0: Math.min(p[0][0], p[1][0]), y0: Math.min(p[0][1], p[1][1]), x1: Math.max(p[0][0], p[1][0]), y1: Math.max(p[0][1], p[1][1]) };
   }
-  const VALID = /^(\d{1,2}\/\d{1,3}|\d{3,4})$/;
+  const VALID = /^(\d{1,2}\/\d{1,3}|\/\d{1,3}|\d{3,4})$/;
 
   /* 1) find where the numbers are with a quick look at 0° and 90°;
      2) group nearby finds into callouts;
@@ -330,7 +337,8 @@ details summary { cursor: pointer; font-weight: 600; }
     const w = await getOcr();
     const v1 = page.getViewport({ scale: 1 });
     const findScale = Math.min(200 / 72, Math.sqrt(9e6 / (v1.width * v1.height)));
-    const full = await renderRegion(page, null, findScale);
+    const full = cleanCanvas(await renderRegion(page, null, findScale), 8 * 0.72 * findScale);
+    if (window.__kudosImgs) window.__kudosImgs.push({ name: 'find', url: full.toDataURL('image/png') });
     await w.setParameters({ tessedit_pageseg_mode: '11', tessedit_char_whitelist: '0123456789/.' });
     const finds = [];
     for (const [i, rot] of [0, 90].entries()) {
@@ -338,24 +346,29 @@ details summary { cursor: pointer; font-weight: 600; }
       const img = rotateCanvas(full, rot);
       const { data } = await w.recognize(img);
       data.words.forEach(x => { if (/\d/.test(x.text) && x.confidence >= 15) { const b = toBox(rot, x.bbox, full.width, full.height);
-        finds.push({ x0: b.x0 / findScale, y0: b.y0 / findScale, x1: b.x1 / findScale, y1: b.y1 / findScale }); } });
+        finds.push({ x0: b.x0 / findScale, y0: b.y0 / findScale, x1: b.x1 / findScale, y1: b.y1 / findScale, conf: x.confidence }); } });
     }
     ocrProgress = null;
     // group finds that sit within about one text height of each other
     const groups = [];
     finds.forEach(f => {
       const h = Math.min(f.x1 - f.x0, f.y1 - f.y0) || 4;
-      const g = { x0: f.x0 - h, y0: f.y0 - h, x1: f.x1 + h, y1: f.y1 + h };
+      const g = { x0: f.x0 - h, y0: f.y0 - h, x1: f.x1 + h, y1: f.y1 + h, hs: f.conf >= 40 ? [h] : [] };
       for (let k = 0; k < groups.length; k++) { const o = groups[k];
-        if (g.x0 < o.x1 && g.x1 > o.x0 && g.y0 < o.y1 && g.y1 > o.y0) { g.x0 = Math.min(g.x0, o.x0); g.y0 = Math.min(g.y0, o.y0); g.x1 = Math.max(g.x1, o.x1); g.y1 = Math.max(g.y1, o.y1); groups.splice(k, 1); k = -1; } }
+        if (g.x0 < o.x1 && g.x1 > o.x0 && g.y0 < o.y1 && g.y1 > o.y0) { g.x0 = Math.min(g.x0, o.x0); g.y0 = Math.min(g.y0, o.y0); g.x1 = Math.max(g.x1, o.x1); g.y1 = Math.max(g.y1, o.y1); g.hs = g.hs.concat(o.hs); groups.splice(k, 1); k = -1; } }
       groups.push(g);
     });
     const regions = groups.filter(g => (g.x1 - g.x0) * (g.y1 - g.y0) < 0.08 * v1.width * v1.height);
+    // digit height for each callout (median of the clear finds), used to tell strokes from solid symbols
+    regions.forEach(g => { const hs = g.hs.slice().sort((a, b) => a - b); g.h = hs.length ? hs[hs.length >> 1] : 6; });
     const words = [], unclear = [];
     const pad = 60;
+    // read a little beyond each group so half-found callouts are not cut off
+    regions.forEach(g => { const m = 0.9 * g.h; g.x0 = Math.max(0, g.x0 - m); g.y0 = Math.max(0, g.y0 - m); g.x1 = Math.min(v1.width, g.x1 + m); g.y1 = Math.min(v1.height, g.y1 + m); });
     const readAt = async (r, dpi, rot) => {
       const S = dpi / 72;
-      const crop = inkOnly(await renderRegion(page, r, S));
+      const crop = cleanCanvas(await renderRegion(page, r, S), r.h * S);
+      if (window.__kudosImgs && dpi === 600 && rot === 0) window.__kudosImgs.push({ name: `r${Math.round(r.x0)}_${Math.round(r.y0)}_h${r.h.toFixed(1)}`, url: crop.toDataURL('image/png') });
       const img = padCanvas(rotateCanvas(crop, rot), pad);
       const { data } = await w.recognize(img);
       const toPage = (pb) => { const bb = toBox(rot, { x0: pb.x0 - pad, y0: pb.y0 - pad, x1: pb.x1 - pad, y1: pb.y1 - pad }, crop.width, crop.height);
@@ -368,16 +381,25 @@ details summary { cursor: pointer; font-weight: 600; }
       const r = regions[i];
       // which way up is this callout? read at 0°, 90° and 270° and keep the best
       let best = null, bestRot = 0;
-      for (const rot of [0, 90, 270]) { const res = await readAt(r, 900, rot); if (!best || res.score > best.score) { best = res; bestRot = rot; } }
+      for (const rot of [0, 90, 270]) { const res = await readAt(r, 600, rot); if (!best || res.score > best.score) { best = res; bestRot = rot; } }
       if (best.score === 0) continue;
       // read it twice more at other sizes; the reads vote later
-      const reads = [best, await readAt(r, 600, bestRot), await readAt(r, 1200, bestRot)];
-      if (window.__kudosDebug) reads.forEach((rd, k) => window.__kudosDebug.push({ r, rot: bestRot + '@' + [900, 600, 1200][k], score: rd.score, text: rd.ws.map(x => x.text + '(' + Math.round(x.conf) + ')').join(' ') }));
+      const reads = [best, await readAt(r, 300, bestRot), await readAt(r, 900, bestRot)];
+      if (window.__kudosDebug) reads.forEach((rd, k) => window.__kudosDebug.push({ r, rot: bestRot + '@' + [600, 300, 900][k], score: rd.score, text: rd.ws.map(x => x.text + '(' + Math.round(x.conf) + ')').join(' ') }));
       reads.forEach((rd, k) => rd.ws.forEach(x => {
         words.push({ text: x.text, conf: x.conf, refined: true, ...rd.toPage(x.pb) });
         // anything that reads poorly gets a tight look on its own line, clear of truss and symbols
         if (k === 0 && (x.text.match(/\d/g) || []).length >= 2 && (x.conf < 85 || !VALID.test(x.text))) unclear.push({ img: rd.img, pb: x.pb, toPage: rd.toPage });
       }));
+    }
+    // whole-page reads at small sizes: blurry plans (screenshots pasted into the drawing) read best small
+    for (const [i, dpi] of [150, 200, 250].entries()) {
+      say(`Reading page ${pageNo} at ${dpi} dpi`, 0.62 + 0.12 * i / 3);
+      const sc = Math.min(dpi / 72, Math.sqrt(14e6 / (v1.width * v1.height)));
+      const img = cleanCanvas(await renderRegion(page, null, sc), 8 * 0.72 * sc);
+      const { data } = await w.recognize(img);
+      data.words.forEach(x => { if (/\d/.test(x.text)) words.push({ text: x.text.trim(), conf: x.confidence,
+        x0: x.bbox.x0 / sc, y0: x.bbox.y0 / sc, x1: x.bbox.x1 / sc, y1: x.bbox.y1 / sc }); });
     }
     if (unclear.length) {
       await w.setParameters({ tessedit_pageseg_mode: '7', tessedit_char_whitelist: '0123456789/' });
@@ -457,7 +479,7 @@ details summary { cursor: pointer; font-weight: 600; }
       const res = K.buildRows(pages, library(), { legend: legendFromKey, positions });
       positionNames = [...new Set(positions.map(l => l.name))];
       legend = K.extractLegend(words).concat(legendFromKey.map(f => ({ name: f.name + ' (' + f.mode + ')', count: f.qty })));
-      rows = res.rows.map(r => ({ id: nextId++, channel: r.channel, universe: r.universe, address: r.address, fixture: r.fixture, auto: !!r.fixture, guessFp: r.footprintGuess, ocr: !!r.ocr, position: r.position || '' }));
+      rows = res.rows.map(r => ({ id: nextId++, channel: r.channel, universe: r.universe, address: r.address, fixture: r.fixture, auto: !!r.fixture, guessFp: r.footprintGuess, ocr: !!r.ocr, position: r.position || '', inferred: r.inferred || '', readUniverse: r.readUniverse, readAs: r.readAs, readChannel: r.readChannel, readAddress: r.readAddress }));
       issues = res.issues;
       recompute();
       isExample = false;
@@ -514,7 +536,7 @@ details summary { cursor: pointer; font-weight: 600; }
     const list = liveIssues(); const ul = $('checks'); ul.textContent = '';
     if (!list.length) { const li = document.createElement('li'); li.innerHTML = '<span class="dot ok"></span>'; li.append(rows.length ? `All ${rows.length} labels have a channel, address and fixture. No duplicates or gaps.` : 'Load a patch PDF to start.'); ul.append(li); }
     list.forEach(i => { const li = document.createElement('li'); const d = document.createElement('span');
-      d.className = 'dot ' + (['auto', 'gap', 'count'].includes(i.type) ? 'warn' : 'bad'); li.append(d, i.msg); ul.append(li); });
+      d.className = 'dot ' + (['auto', 'gap', 'count', 'inferred'].includes(i.type) ? 'warn' : 'bad'); li.append(d, i.msg); ul.append(li); });
     $('legendBox').hidden = !legend.length; const lg = $('legend'); lg.textContent = '';
     legend.forEach(l => { const c = document.createElement('span'); c.className = 'chip'; c.textContent = l.name + (l.count != null ? ' × ' + l.count : ''); lg.append(c); });
     const dl = $('fxlist'); dl.textContent = '';
@@ -532,13 +554,13 @@ details summary { cursor: pointer; font-weight: 600; }
       const rowClass = () => (!r.fixture || !r.channel || r.universe == null) ? 'need' : (r.auto || r.ocr) ? 'check' : '';
       tr.className = rowClass();
       const ch = document.createElement('input'); ch.type = 'number'; ch.id = 'ch-' + r.id; ch.value = r.channel ?? ''; ch.setAttribute('aria-label', 'Channel for ' + (addrText(r) || 'label'));
-      ch.addEventListener('change', () => { r.channel = ch.value ? +ch.value : null; renderChecks(); renderSheets(); tr.className = rowClass(); });
+      ch.addEventListener('change', () => { r.channel = ch.value ? +ch.value : null; r.inferred = ''; renderChecks(); renderSheets(); tr.className = rowClass(); });
       const td1 = document.createElement('td'); td1.append(ch);
 
       const td2 = document.createElement('td'); td2.className = 'mono';
       const uIn = document.createElement('input'); uIn.type = 'text'; uIn.id = 'ad-' + r.id; uIn.value = addrText(r); uIn.placeholder = 'u.addr'; uIn.style.width = '90px'; uIn.className = 'mono'; uIn.setAttribute('aria-label', 'DMX address');
       uIn.addEventListener('change', () => { const m = uIn.value.trim().match(/^(\d{1,2})\s*[.\/]\s*(\d{1,3})$/);
-        if (m) { r.universe = +m[1]; r.address = +m[2]; recompute(); render(); } else { toast('Write the address as universe.address, for example 2.177'); uIn.value = addrText(r); } });
+        if (m) { r.universe = +m[1]; r.address = +m[2]; r.inferred = ''; recompute(); render(); } else { toast('Write the address as universe.address, for example 2.177'); uIn.value = addrText(r); } });
       td2.append(uIn);
 
       const tdP = document.createElement('td');
@@ -563,10 +585,11 @@ details summary { cursor: pointer; font-weight: 600; }
       if (r.universe == null) tag('miss', 'Needs address');
       if (!r.fixture) tag('miss', 'Needs fixture');
       else if (r.auto) { const b = document.createElement('button'); b.type = 'button'; b.className = 'link'; b.textContent = 'Confirm'; b.title = 'Mark this fixture name as checked';
-        b.addEventListener('click', () => { r.auto = false; r.ocr = false; render(); }); td5.append(b); }
+        b.addEventListener('click', () => { r.auto = false; r.ocr = false; r.inferred = ''; render(); }); td5.append(b); }
       else if (r.ocr) { const b = document.createElement('button'); b.type = 'button'; b.className = 'link'; b.textContent = 'Confirm'; b.title = 'Read from a picture of the plan. Mark as checked.';
-        b.addEventListener('click', () => { r.ocr = false; render(); }); td5.append(b); }
-      if (r.ocr) tag('pic', 'From picture');
+        b.addEventListener('click', () => { r.ocr = false; r.inferred = ''; render(); }); td5.append(b); }
+      if (r.inferred) tag('auto', 'Inferred');
+      else if (r.ocr) tag('pic', 'From picture');
 
       const td6 = document.createElement('td'); const del = document.createElement('button'); del.type = 'button'; del.className = 'del'; del.textContent = '×'; del.setAttribute('aria-label', 'Remove label ' + (r.channel || ''));
       del.addEventListener('click', () => { rows = rows.filter(o => o !== r); recompute(); render(); });
